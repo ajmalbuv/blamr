@@ -52,3 +52,4 @@ release:
   github:
     owner: ajmalbuv
     name: blamr
+  replace_existing_artifacts: true
