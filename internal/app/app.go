@@ -5,12 +5,25 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"runtime/debug"
 	"strings"
 
 	"github.com/ajmalbuv/blamr/internal/blame"
 	"github.com/ajmalbuv/blamr/internal/config"
 	"github.com/ajmalbuv/blamr/internal/output"
 )
+
+// resolveVersion resolves the version string from GoReleaser ldflags,
+// or falls back to runtime/debug info embedded by 'go install ...@version'.
+func resolveVersion(v string) string {
+	if v != "" && v != "dev" {
+		return v
+	}
+	if info, ok := debug.ReadBuildInfo(); ok && info.Main.Version != "" && info.Main.Version != "(devel)" {
+		return info.Main.Version
+	}
+	return "dev"
+}
 
 // Run executes the blamr application lifecycle given the build version.
 func Run(version string) {
@@ -24,7 +37,8 @@ func Run(version string) {
 	}
 
 	if cfg.ShowVersion {
-		fmt.Printf("blamr version %s (%s/%s)\n", version, runtime.GOOS, runtime.GOARCH)
+		v := resolveVersion(version)
+		fmt.Printf("blamr version %s (%s/%s)\n", v, runtime.GOOS, runtime.GOARCH)
 		return
 	}
 
