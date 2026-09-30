@@ -2,7 +2,6 @@
 
 > Ultra-fast, concurrent `git-blame` author attribution and line statistics CLI tool written in pure Go (zero CGO).
 
-[![Go Report Card](https://goreportcard.com/badge/github.com/ajmalbuv/blamr)](https://goreportcard.com/report/github.com/ajmalbuv/blamr)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 ---
