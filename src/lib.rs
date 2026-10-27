@@ -109,5 +109,5 @@ fn print_json_result(stats: &stats::Stats) -> i32 {
 }
 
 fn is_broken_pipe(error: &io::Error) -> bool {
-    error.kind() == io::ErrorKind::BrokenPipe || error.raw_os_error() == Some(32)
+    error.kind() == io::ErrorKind::BrokenPipe
 }

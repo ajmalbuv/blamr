@@ -27,7 +27,7 @@ where
         return Ok(Stats::empty());
     }
 
-    let workers = config.workers.max(1);
+    let workers = config.workers.max(1).min(total);
     let config = Arc::new(config.clone());
     let job_capacity = workers.saturating_mul(2).max(1);
     let (job_tx, job_rx) = bounded::<TrackedPath>(job_capacity);
@@ -238,6 +238,7 @@ fn line_authors_at(
 
     Ok(line_authors(&buffer_blame, line_count, config))
 }
+
 #[derive(Clone)]
 struct LineAuthor {
     author: String,

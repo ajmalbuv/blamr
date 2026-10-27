@@ -407,3 +407,94 @@ fn alternate_index_file_is_honored() {
     assert_success(&output);
     assert_eq!(json(&output)["total_files"], 2);
 }
+
+#[test]
+fn conflicted_files_are_counted_once() {
+    let git_available = std::process::Command::new("git")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success());
+    if !git_available {
+        return;
+    }
+
+    let repo = TestRepo::new();
+    repo.commit_file("file.txt", "base\n", "Alice", "alice@example.com", "base");
+
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .current_dir(repo.path())
+            .args(args)
+            .output()
+            .unwrap()
+    };
+
+    assert!(git(&["checkout", "-b", "side"]).status.success());
+    repo.write("file.txt", "theirs\n");
+    assert!(
+        git(&[
+            "-c",
+            "user.name=Alice",
+            "-c",
+            "user.email=alice@example.com",
+            "commit",
+            "-am",
+            "theirs",
+        ])
+        .status
+        .success()
+    );
+    assert!(git(&["checkout", "-"]).status.success());
+    repo.write("file.txt", "ours\n");
+    assert!(
+        git(&[
+            "-c",
+            "user.name=Alice",
+            "-c",
+            "user.email=alice@example.com",
+            "commit",
+            "-am",
+            "ours",
+        ])
+        .status
+        .success()
+    );
+
+    let merge = git(&["-c", "merge.conflictStyle=merge", "merge", "side"]);
+    assert!(!merge.status.success());
+    assert!(
+        String::from_utf8_lossy(&merge.stdout).contains("CONFLICT")
+            || String::from_utf8_lossy(&merge.stderr).contains("CONFLICT")
+    );
+
+    let value = json(&run(&repo, &["-json"]));
+    assert_eq!(value["total_files"], 1);
+    assert_eq!(value["total_lines"], 5);
+    assert_eq!(value["authors"][0]["author"], "Not Committed Yet");
+    assert_eq!(value["authors"][0]["lines"], 3);
+    assert_eq!(value["authors"][1]["author"], "Alice");
+    assert_eq!(value["authors"][1]["lines"], 2);
+}
+
+#[cfg(unix)]
+#[test]
+fn symlink_entries_are_analyzed_as_links() {
+    use std::os::unix::fs::symlink;
+
+    let repo = TestRepo::new();
+    let outside = tempfile::tempdir().unwrap();
+    let target = outside.path().join("target.bin");
+    std::fs::write(&target, b"a\0b\n").unwrap();
+    symlink(&target, repo.path().join("link.png")).unwrap();
+    repo.stage("link.png");
+    repo.commit("Alice", "alice@example.com", "link");
+
+    let value = json(&run(&repo, &["-json"]));
+    assert_eq!(value["total_files"], 1);
+    assert_eq!(value["total_lines"], 1);
+    assert_eq!(value["authors"][0]["author"], "Alice");
+
+    let value = json(&run(&repo, &["-json", "link.png"]));
+    assert_eq!(value["total_files"], 1);
+    assert_eq!(value["total_lines"], 1);
+}
