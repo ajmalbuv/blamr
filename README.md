@@ -80,7 +80,7 @@ Total                        12450
 Scope the analysis to files or directories:
 
 ```console
-blamr ./src ./internal
+blamr ./src ./tests
 blamr frontend/
 blamr -- -dash-prefixed-file.txt
 ```
@@ -147,10 +147,12 @@ is 0 and the array is empty.
 
 - standard repositories, linked worktrees, subdirectory invocation, and `GIT_DIR`,
   `GIT_WORK_TREE`, and `GIT_INDEX_FILE`;
-- staged files, unborn branches, merge/rebase conflicts, add/add and delete/modify conflicts;
-- `.mailmap`, `core.autocrlf` CRLF checkout normalization, symlinks, gitlinks, and submodules;
-- generated-file, minified-file, binary, UTF-16, and Git LFS filtering;
-- deleted worktree files and per-file errors as warnings that do not stop the run.
+- staged files and conflicted worktrees; conflict marker lines are attributed to
+  `Not Committed Yet`;
+- `.mailmap`, `core.autocrlf` CRLF checkout normalization, and symlinks;
+- generated-file, minified-file, binary, Git LFS, and UTF-16 BOM recognition;
+- gitlinks, submodules, deleted worktree files, and per-file errors as warnings that do not stop
+  the run.
 
 It does not emulate `blame.ignoreRevsFile`, arbitrary clean/smudge filters or textconv drivers,
 pathspec glob or magic syntax, partial-clone lazy fetching, SHA-256 or reftable repositories, or
@@ -163,6 +165,10 @@ Non-UTF-8 paths and author names are handled lossily.
 | :--- | :--- |
 | Bare repository | error, exit 1 |
 | CWD outside the worktree with `GIT_DIR`/`GIT_WORK_TREE` | analyzes the whole worktree |
+| Conflicted worktree | counted once; conflict marker lines are `Not Committed Yet` |
+| Unborn branch | per-file warning; no HEAD attribution |
+| Gitlink/submodule | per-file warning; other files continue |
+| Symlink | analyzed as its link blob (target path), not the target file |
 | Whitespace-only uncommitted edits | attributes the line to `Not Committed Yet` |
 | Non-ASCII path | preserves the path and may succeed where Git text handling would fail |
 | Closed output pipe | exits successfully |

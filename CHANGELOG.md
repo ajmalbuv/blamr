@@ -7,7 +7,14 @@ All notable changes to this project will be documented in this file.
 ### Changed
 
 - Rewrote the project in Rust, replacing the Go implementation.
-- statically linking `libgit2`.
+- Statically linked `libgit2`.
 - Added cargo-dist release archives, shell and PowerShell installers, crates.io publishing, and
   cargo-binstall metadata.
 - `v0.0.2` is the final Go release.
+
+### Fixed
+
+- Count conflicted index entries once.
+- Preserve explicit symlink paths and treat symlinks as text blobs.
+- Avoid spawning more workers than files.
+- Correctly detect broken stdout pipes on Windows.

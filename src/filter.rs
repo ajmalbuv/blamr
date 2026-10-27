@@ -1,4 +1,4 @@
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::Read;
 use std::path::Path;
 
@@ -70,6 +70,12 @@ pub fn is_binary_data(data: &[u8]) -> bool {
 }
 
 pub fn should_skip(fs_path: &Path, git_path: &str) -> bool {
+    if let Ok(metadata) = fs::symlink_metadata(fs_path)
+        && metadata.file_type().is_symlink()
+    {
+        return false;
+    }
+
     if is_generated_file(git_path) || is_minified_or_map(git_path) || is_binary_extension(git_path)
     {
         return true;

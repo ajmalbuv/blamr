@@ -1,6 +1,7 @@
 use crate::config::Config;
 use crate::filter;
 use git2::Repository;
+use std::collections::HashSet;
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
@@ -48,9 +49,10 @@ pub fn collect_tracked(config: &Config) -> Result<Vec<TrackedPath>, String> {
         .map_err(|error| format!("cannot open repository index: {error}"))?;
 
     let mut tracked = Vec::new();
+    let mut seen = HashSet::new();
 
     for entry in index.iter() {
-        if entry.path.is_empty() {
+        if entry.path.is_empty() || !seen.insert(entry.path.clone()) {
             continue;
         }
 
@@ -99,7 +101,7 @@ fn explicit_paths(paths: &[OsString], cwd: &Path, workdir: &Path) -> Result<Vec<
         } else {
             cwd.join(path)
         };
-        let absolute = canonicalize_or(absolute);
+        let absolute = canonicalize_explicit(absolute);
         let absolute = normalize_path(&absolute);
         let Some(relative) = relative_to_workdir(&absolute, workdir) else {
             return Err(format!(
@@ -111,6 +113,17 @@ fn explicit_paths(paths: &[OsString], cwd: &Path, workdir: &Path) -> Result<Vec<
     }
 
     Ok(bases)
+}
+
+fn canonicalize_explicit(path: PathBuf) -> PathBuf {
+    if let Ok(metadata) = fs::symlink_metadata(&path)
+        && metadata.file_type().is_symlink()
+        && let (Some(parent), Some(name)) = (path.parent(), path.file_name())
+    {
+        return canonicalize_or(parent.to_path_buf()).join(name);
+    }
+
+    canonicalize_or(path)
 }
 
 fn relative_to_workdir(path: &Path, workdir: &Path) -> Option<PathBuf> {
