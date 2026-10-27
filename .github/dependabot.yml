@@ -9,9 +9,12 @@ updates:
       github-actions:
         patterns:
           - "*"
-
-  # Monitor Go modules (go.mod)
-  - package-ecosystem: "gomod"
+  # Monitor Cargo dependencies (Cargo.toml / Cargo.lock)
+  - package-ecosystem: "cargo"
     directory: "/"
     schedule:
       interval: "weekly"
+    groups:
+      cargo:
+        patterns:
+          - "*"

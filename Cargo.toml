@@ -1,0 +1,43 @@
+[package]
+name = "blamr"
+version = "0.0.3"
+edition = "2024"
+rust-version = "1.88"
+description = "Concurrent git-blame author attribution and line statistics"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/ajmalbuv/blamr"
+
+[dependencies]
+git2 = { version = "0.21", default-features = false, features = ["vendored-libgit2"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+crossbeam-channel = "0.5"
+
+[dev-dependencies]
+assert_cmd = "2"
+tempfile = "3"
+pretty_assertions = "1"
+
+[[bin]]
+name = "blamr"
+path = "src/bin/blamr.rs"
+
+[[bin]]
+name = "git-blamr"
+path = "src/bin/git-blamr.rs"
+
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ target }.tar.gz"
+bin-dir = "{ name }-{ target }/{ bin }{ binary-ext }"
+pkg-fmt = "tgz"
+
+[package.metadata.binstall.overrides.'cfg(windows)']
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ target }.zip"
+bin-dir = "{ bin }{ binary-ext }"
+pkg-fmt = "zip"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
