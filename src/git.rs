@@ -99,6 +99,7 @@ fn explicit_paths(paths: &[OsString], cwd: &Path, workdir: &Path) -> Result<Vec<
         } else {
             cwd.join(path)
         };
+        let absolute = canonicalize_or(absolute);
         let absolute = normalize_path(&absolute);
         let Some(relative) = relative_to_workdir(&absolute, workdir) else {
             return Err(format!(
@@ -249,7 +250,20 @@ fn path_to_git_bytes(path: &Path) -> Vec<u8> {
 }
 
 fn canonicalize_or(path: PathBuf) -> PathBuf {
-    fs::canonicalize(&path).unwrap_or(path)
+    if let Ok(canonical) = fs::canonicalize(&path) {
+        return canonical;
+    }
+
+    let Some(name) = path.file_name() else {
+        return path;
+    };
+    let Some(parent) = path.parent() else {
+        return path;
+    };
+    match fs::canonicalize(parent) {
+        Ok(canonical_parent) => canonical_parent.join(name),
+        Err(_) => path,
+    }
 }
 
 fn normalize_path(path: &Path) -> PathBuf {
