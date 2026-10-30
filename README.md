@@ -4,24 +4,31 @@
 
 [![crates.io](https://img.shields.io/crates/v/blamr.svg)](https://crates.io/crates/blamr)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+![Build Status](https://github.com/ajmalbuv/blamr/actions/workflows/ci.yml/badge.svg)
 
 `blamr` is a local-only Git authorship and line-statistics tool. It embeds libgit2, so the
 released binaries never invoke a `git` executable and do not require Git to be installed.
 
-Both binaries are included in every release:
-
-- `blamr`: standalone command.
-- `git-blamr`: Git subcommand entry point, invoked as `git blamr`.
+Every release ships a single `blamr` binary. The shell and PowerShell installers also create a
+`git-blamr` alias so `git blamr` works. Archive downloads contain only `blamr`; create a symlink
+or hardlink named `git-blamr` yourself if you want the Git subcommand.
 
 ## Installation
 
 ### Prebuilt binaries
 
 Download the archive for your platform from
-[GitHub Releases](https://github.com/ajmalbuv/blamr/releases), extract it, and put both
-`blamr` and `git-blamr` on `PATH`.
+[GitHub Releases](https://github.com/ajmalbuv/blamr/releases), extract the single `blamr`
+binary, and put it on `PATH`. To use `git blamr`, also create a symlink or hardlink named
+`git-blamr` pointing at `blamr`.
 
-Linux and macOS installers are also published with every release:
+For example, after extracting `blamr` to a directory on `PATH`:
+
+```console
+ln -s blamr git-blamr
+```
+
+Linux and macOS installers are also published with every release, and create the alias for you:
 
 ```console
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/ajmalbuv/blamr/releases/latest/download/blamr-installer.sh | sh
@@ -34,7 +41,8 @@ powershell -ExecutionPolicy Bypass -c "irm https://github.com/ajmalbuv/blamr/rel
 ```
 
 Windows archives are `.zip`; Linux and macOS archives are `.tar.gz`. Linux builds use musl and
-are statically linked. macOS x86_64 and arm64 archives are separate.
+are fully statically linked, so the same binary runs on glibc and musl distributions. No separate
+glibc build is published. macOS x86_64 and arm64 archives are separate.
 
 ### cargo-binstall
 
@@ -42,7 +50,9 @@ are statically linked. macOS x86_64 and arm64 archives are separate.
 cargo binstall blamr
 ```
 
-This installs the prebuilt binaries from GitHub Releases without compiling.
+This installs the prebuilt binary from GitHub Releases without compiling. On glibc Linux hosts it
+resolves to the static musl archive. Like `cargo install`, it installs only `blamr`; create the
+`git-blamr` alias manually if you need `git blamr`.
 
 ### crates.io
 
@@ -52,7 +62,7 @@ cargo install blamr
 
 Compiling from source requires CMake and a C toolchain for the vendored libgit2.
 
-The binaries are unsigned. Windows SmartScreen and macOS Gatekeeper may warn about downloaded
+Release binaries are unsigned. Windows SmartScreen and macOS Gatekeeper may warn about downloaded
 binaries. There is no notarization, code signing, or WinGet manifest.
 
 Git is not required at runtime. Custom clean/smudge filters and textconv drivers are not
@@ -64,7 +74,7 @@ Run inside a repository to analyze every tracked text file:
 
 ```console
 $ blamr
-$ git blamr
+$ git blamr   # when the git-blamr alias is installed
 ```
 
 ```text
@@ -94,11 +104,14 @@ blamr -ext .rs,.ts,.py
 Attribution and output options:
 
 ```console
-blamr -email          # group by email address
-blamr -ignore-blank   # skip empty and whitespace-only lines
-blamr -committed-only # exclude working-tree edits
-blamr -json           # structured JSON
-blamr -j 4            # worker count
+blamr -email             # group by email address
+blamr -ignore-blank      # skip empty and whitespace-only lines
+blamr -ignore-whitespace # attribute whitespace-only changes to the previous author
+blamr -committed-only    # exclude working-tree edits
+blamr -json              # structured JSON
+blamr -ascii             # ASCII-only table/progress output
+blamr -no-progress       # hide progress output
+blamr -j 4               # worker count
 ```
 
 ### Flags
@@ -109,10 +122,13 @@ blamr -j 4            # worker count
 | `-j <num>` | CPU count | Number of blame workers. Values below 1 use the default. |
 | `-email` | `false` | Group by author email instead of name. |
 | `-ignore-blank` | `false` | Ignore empty and whitespace-only lines. |
+| `-ignore-whitespace` | `false` | Ignore whitespace-only changes when attributing lines, like `git blame -w`. |
 | `-committed-only` | `false` | Exclude uncommitted working-tree changes. |
 | `-json` | `false` | Emit JSON with two-space indentation. |
+| `-ascii` | auto | Use ASCII-only table and progress glyphs. Auto-detected from the terminal. |
+| `-no-progress` | `false` | Disable progress output. |
 | `-v`, `-version` | `false` | Print the version and exit. |
-| `-h`, `-help` | `false` | Print help to stderr and exit 0. |
+| `-h`, `-help` | `false` | Print help to stdout and exit 0. |
 
 Flags may appear before or after paths. `--` ends flag parsing. `-ext` and `-j` are last-wins.
 Exit status is 0 on success, 1 for execution failures, and 2 for usage errors.
@@ -166,11 +182,13 @@ Non-UTF-8 paths and author names are handled lossily.
 | Bare repository | error, exit 1 |
 | CWD outside the worktree with `GIT_DIR`/`GIT_WORK_TREE` | analyzes the whole worktree |
 | Conflicted worktree | counted once; conflict marker lines are `Not Committed Yet` |
-| Unborn branch | per-file warning; no HEAD attribution |
+| Unborn branch | current lines are `Not Committed Yet` |
 | Gitlink/submodule | per-file warning; other files continue |
 | Symlink | analyzed as its link blob (target path), not the target file |
-| Whitespace-only uncommitted edits | attributes the line to `Not Committed Yet` |
+| Whitespace-only edits | `Not Committed Yet` by default; `-ignore-whitespace` keeps the previous author |
 | Non-ASCII path | preserves the path and may succeed where Git text handling would fail |
+| Progress output | written to stderr; stdout stays clean for tables and JSON |
+| Terminal encoding | Unicode glyphs when supported, ASCII otherwise; `-ascii` forces ASCII |
 | Closed output pipe | exits successfully |
 | Invoked from inside `.git` | finds no tracked files |
 | Invalid UTF-8 path/author bytes | lossy conversion at display and JSON boundaries |

@@ -9,7 +9,10 @@ pub struct Config {
     pub show_version: bool,
     pub by_email: bool,
     pub ignore_blank: bool,
+    pub ignore_whitespace: bool,
     pub committed_only: bool,
+    pub ascii: bool,
+    pub no_progress: bool,
     pub paths: Vec<OsString>,
 }
 
@@ -72,7 +75,10 @@ pub fn parse(
     let mut json_output = false;
     let mut by_email = false;
     let mut ignore_blank = false;
+    let mut ignore_whitespace = false;
     let mut committed_only = false;
+    let mut ascii = false;
+    let mut no_progress = false;
     let mut paths = Vec::new();
 
     let mut i = 0;
@@ -104,7 +110,6 @@ pub fn parse(
 
         match name {
             "h" | "help" => {
-                write_help(out, default_workers);
                 return Err(ParseError::Help);
             }
             "ext" => {
@@ -225,6 +230,45 @@ pub fn parse(
                     ));
                 }
             },
+            "ignore-whitespace" => match parse_bool_flag(inline.as_deref()) {
+                Ok(value) => ignore_whitespace = value,
+                Err(()) => {
+                    return Err(fail(
+                        out,
+                        default_workers,
+                        format!(
+                            "invalid boolean value {:?} for -ignore-whitespace: parse error",
+                            inline.as_deref().unwrap_or("")
+                        ),
+                    ));
+                }
+            },
+            "ascii" => match parse_bool_flag(inline.as_deref()) {
+                Ok(value) => ascii = value,
+                Err(()) => {
+                    return Err(fail(
+                        out,
+                        default_workers,
+                        format!(
+                            "invalid boolean value {:?} for -ascii: parse error",
+                            inline.as_deref().unwrap_or("")
+                        ),
+                    ));
+                }
+            },
+            "no-progress" => match parse_bool_flag(inline.as_deref()) {
+                Ok(value) => no_progress = value,
+                Err(()) => {
+                    return Err(fail(
+                        out,
+                        default_workers,
+                        format!(
+                            "invalid boolean value {:?} for -no-progress: parse error",
+                            inline.as_deref().unwrap_or("")
+                        ),
+                    ));
+                }
+            },
             _ => {
                 return Err(fail(
                     out,
@@ -266,14 +310,17 @@ pub fn parse(
         show_version: version_flag || v_flag,
         by_email,
         ignore_blank,
+        ignore_whitespace,
         committed_only,
+        ascii,
+        no_progress,
         paths,
     })
 }
 
 fn fail(out: &mut dyn Write, default_workers: usize, message: impl Into<String>) -> ParseError {
     let message = message.into();
-    let _ = writeln!(out, "{message}");
+    let _ = writeln!(out, "error: {message}");
     write_help(out, default_workers);
     ParseError::Message(message)
 }
@@ -298,18 +345,26 @@ pub fn help_text(default_workers: usize) -> String {
          \x20 git blamr [flags] [paths...]\n\
          \n\
          Flags:\n\
+         \x20 -ascii\n\
+         \x20   \tuse ASCII table and progress output\n\
          \x20 -committed-only\n\
          \x20   \texclude uncommitted working tree changes from attribution\n\
          \x20 -email\n\
          \x20   \taggregate lines by author email instead of name\n\
          \x20 -ext string\n\
          \x20   \tcomma-separated extensions to filter (e.g. .typ,.tex,.rs). Defaults to all text files.\n\
+         \x20 -h, -help\n\
+         \x20   \tprint this help and exit\n\
          \x20 -ignore-blank\n\
          \x20   \tignore empty and whitespace-only lines\n\
+         \x20 -ignore-whitespace\n\
+         \x20   \tignore whitespace-only changes when attributing lines (like git blame -w)\n\
          \x20 -j int\n\
          \x20   \tnumber of concurrent git-blame workers (default {default_workers})\n\
          \x20 -json\n\
          \x20   \toutput results as structured JSON\n\
+         \x20 -no-progress\n\
+         \x20   \tdisable progress output\n\
          \x20 -v\tprint version information and exit (shorthand)\n\
          \x20 -version\n\
          \x20   \tprint version information and exit\n"
@@ -337,9 +392,29 @@ mod tests {
         assert!(!cfg.json_output);
         assert!(!cfg.by_email);
         assert!(!cfg.ignore_blank);
+        assert!(!cfg.ignore_whitespace);
         assert!(!cfg.committed_only);
+        assert!(!cfg.ascii);
+        assert!(!cfg.no_progress);
         assert!(cfg.extensions.is_empty());
         assert!(cfg.paths.is_empty());
+    }
+
+    #[test]
+    fn output_and_whitespace_flags_parse() {
+        let mut out = Vec::new();
+        let cfg = parse(
+            &args(&["-ascii", "-no-progress", "-ignore-whitespace"]),
+            4,
+            &mut out,
+        )
+        .unwrap();
+        assert!(cfg.ascii);
+        assert!(cfg.no_progress);
+        assert!(cfg.ignore_whitespace);
+
+        let cfg = parse(&args(&["-ascii=false"]), 4, &mut out).unwrap();
+        assert!(!cfg.ascii);
     }
 
     #[test]
@@ -424,7 +499,7 @@ mod tests {
         );
         let text = String::from_utf8(out).unwrap();
         assert!(text.starts_with(
-            "invalid value \"999999999999999999999999\" for flag -j: value out of range\nblamr:"
+            "error: invalid value \"999999999999999999999999\" for flag -j: value out of range\nblamr:"
         ));
         assert!(text.contains("Usage:"));
     }
@@ -440,7 +515,7 @@ mod tests {
         assert!(
             String::from_utf8(out)
                 .unwrap()
-                .starts_with("invalid boolean value \"abc\" for -json: parse error\n")
+                .starts_with("error: invalid boolean value \"abc\" for -json: parse error\n")
         );
     }
 
@@ -449,7 +524,8 @@ mod tests {
         let mut out = Vec::new();
         let err = parse(&args(&["-h"]), 4, &mut out).unwrap_err();
         assert_eq!(err, ParseError::Help);
-        assert!(String::from_utf8(out).unwrap().contains("Usage:"));
+        assert!(out.is_empty());
+        assert!(help_text(4).contains("Usage:"));
     }
 
     #[test]

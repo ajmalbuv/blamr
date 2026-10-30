@@ -13,8 +13,6 @@ installers = ["shell", "powershell"]
 targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-musl", "aarch64-pc-windows-msvc", "x86_64-apple-darwin", "x86_64-unknown-linux-musl", "x86_64-pc-windows-msvc"]
 # Publish jobs to run in CI
 publish-jobs = ["./publish-crates"]
-# Custom permissions for the crates.io publish job
-github-custom-job-permissions = { "publish-crates" = { contents = "read" } }
 # Path that installers should place binaries in
 install-path = "CARGO_HOME"
 # The archive format to use for non-windows builds (defaults .tar.xz)
@@ -27,3 +25,12 @@ include = ["THIRD_PARTY_NOTICES.md"]
 hosting = "github"
 # Whether to install an updater program
 install-updater = false
+
+# Installers create a `git-blamr` alias so `git blamr` works without shipping
+# a second copy of the static binary. Archives contain only `blamr`.
+[dist.bin-aliases]
+blamr = ["git-blamr"]
+
+# Custom permissions for the crates.io publish job
+[dist.github-custom-job-permissions.publish-crates]
+contents = "read"

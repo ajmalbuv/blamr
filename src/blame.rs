@@ -6,8 +6,19 @@ use git2::{Blame, BlameOptions, ErrorCode, Oid, Repository};
 use std::collections::HashMap;
 use std::fs;
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::Arc;
 use std::thread;
+
+pub enum BlameEvent<'a> {
+    Progress {
+        done: usize,
+        total: usize,
+        path: &'a str,
+    },
+    Warning {
+        path: &'a str,
+        message: &'a str,
+    },
+}
 
 struct Event {
     display_path: String,
@@ -17,10 +28,10 @@ struct Event {
 pub fn blame_files<F>(
     config: &Config,
     files: Vec<TrackedPath>,
-    mut on_progress: F,
+    mut on_event: F,
 ) -> Result<Stats, String>
 where
-    F: FnMut(usize, usize, &str),
+    F: FnMut(BlameEvent<'_>),
 {
     let total = files.len();
     if total == 0 {
@@ -28,17 +39,15 @@ where
     }
 
     let workers = config.workers.max(1).min(total);
-    let config = Arc::new(config.clone());
     let job_capacity = workers.saturating_mul(2).max(1);
     let (job_tx, job_rx) = bounded::<TrackedPath>(job_capacity);
     let (event_tx, event_rx) = unbounded::<Event>();
-    let job_rx = Arc::new(job_rx);
 
     let mut handles = Vec::with_capacity(workers);
     for index in 0..workers {
-        let jobs = Arc::clone(&job_rx);
+        let jobs = job_rx.clone();
         let events = event_tx.clone();
-        let config = Arc::clone(&config);
+        let config = config.clone();
         let handle = thread::Builder::new()
             .name(format!("blamr-worker-{index}"))
             .spawn(move || worker_loop(&config, &jobs, &events))
@@ -53,14 +62,18 @@ where
             .map_err(|error| format!("cannot queue blame job: {error}"))?;
     }
     drop(job_tx);
+    drop(job_rx);
 
     let mut counts: HashMap<String, u64> = HashMap::new();
     let mut succeeded: u64 = 0;
-    let mut done = 0;
 
-    for event in event_rx {
-        done += 1;
-        on_progress(done, total, &event.display_path);
+    for (done, event) in event_rx.into_iter().enumerate() {
+        let done = done + 1;
+        on_event(BlameEvent::Progress {
+            done,
+            total,
+            path: &event.display_path,
+        });
 
         match event.result {
             Ok(file_counts) => {
@@ -70,7 +83,10 @@ where
                 }
             }
             Err(error) => {
-                eprintln!("warning: blame {}: {error}", event.display_path);
+                on_event(BlameEvent::Warning {
+                    path: &event.display_path,
+                    message: &error,
+                });
             }
         }
     }
@@ -86,15 +102,23 @@ where
 
 fn worker_loop(config: &Config, jobs: &Receiver<TrackedPath>, events: &Sender<Event>) {
     let mut repository: Option<Repository> = None;
+    let mut normalize_crlf: Option<bool> = None;
 
     while let Ok(file) = jobs.recv() {
         let display_path = file.display_path.clone();
 
         let result = catch_unwind(AssertUnwindSafe(|| {
             if repository.is_none() {
-                repository = Some(open_repository()?);
+                let opened = open_repository()?;
+                normalize_crlf = Some(should_normalize_crlf(&opened));
+                repository = Some(opened);
             }
-            blame_worktree(repository.as_ref().unwrap(), config, &file)
+            blame_worktree(
+                repository.as_ref().unwrap(),
+                config,
+                &file,
+                normalize_crlf.unwrap_or(false),
+            )
         }))
         .unwrap_or_else(|_| Err("internal worker panic".to_owned()));
 
@@ -114,6 +138,7 @@ fn blame_worktree(
     repository: &Repository,
     config: &Config,
     file: &TrackedPath,
+    normalize_crlf_enabled: bool,
 ) -> Result<HashMap<String, u64>, String> {
     let contents = file
         .read_worktree()
@@ -127,7 +152,7 @@ fn blame_worktree(
 
     let lines = split_lines(&contents);
     let normalized;
-    let buffer = if should_normalize_crlf(repository) {
+    let buffer = if normalize_crlf_enabled {
         normalized = normalize_crlf(&contents);
         normalized.as_slice()
     } else {
@@ -197,14 +222,26 @@ fn blame_worktree(
     }
 
     let mut options = BlameOptions::new();
-    options.ignore_whitespace(true);
+    options.ignore_whitespace(config.ignore_whitespace);
     options.use_mailmap(true);
 
     let blame = repository
         .blame_file(&file.relative_path, Some(&mut options))
         .map_err(|error| format!("git blame failed: {error}"))?;
+    // `blame_buffer` maps hunk line numbers against the supplied buffer, so if
+    // the worktree file differs from HEAD only in whitespace the hunk offsets
+    // would be wrong when `ignore_whitespace` is set (libgit2 attributes hunks
+    // by byte position in the HEAD blob, not the buffer). Feeding the HEAD blob
+    // itself when the non-whitespace content is identical keeps the offsets
+    // aligned while still honouring whitespace-agnostic attribution.
+    let head_buffer = if config.ignore_whitespace {
+        head_blob_contents(repository, &file.relative_path)?
+            .filter(|head| lines_equivalent_ignoring_whitespace(head, buffer))
+    } else {
+        None
+    };
     let buffer_blame = blame
-        .blame_buffer(buffer)
+        .blame_buffer(head_buffer.as_deref().unwrap_or(buffer))
         .map_err(|error| format!("git blame buffer failed: {error}"))?;
 
     for hunk in buffer_blame.iter() {
@@ -223,7 +260,7 @@ fn line_authors_at(
     config: &Config,
 ) -> Result<Vec<Option<LineAuthor>>, String> {
     let mut options = BlameOptions::new();
-    options.ignore_whitespace(true);
+    options.ignore_whitespace(config.ignore_whitespace);
     options.use_mailmap(true);
     if let Some(commit) = newest {
         options.newest_commit(commit);
@@ -271,7 +308,7 @@ fn count_conflict_lines(
     counts: &mut HashMap<String, u64>,
 ) {
     for (index, line) in lines.iter().enumerate() {
-        if config.ignore_blank && String::from_utf8_lossy(line).trim().is_empty() {
+        if config.ignore_blank && is_blank(line) {
             continue;
         }
 
@@ -341,6 +378,16 @@ fn split_lines(contents: &[u8]) -> Vec<&[u8]> {
     lines
 }
 
+fn is_blank(line: &[u8]) -> bool {
+    if line.iter().all(|byte| byte.is_ascii_whitespace()) {
+        return true;
+    }
+    if line.is_ascii() {
+        return false;
+    }
+    String::from_utf8_lossy(line).trim().is_empty()
+}
+
 fn commit_has_path(
     repository: &Repository,
     commit: Oid,
@@ -360,11 +407,49 @@ fn commit_has_path(
     }
 }
 
+fn head_blob_contents(
+    repository: &Repository,
+    path: &std::path::Path,
+) -> Result<Option<Vec<u8>>, String> {
+    let head = match repository.head() {
+        Ok(head) => head,
+        Err(error) if matches!(error.code(), ErrorCode::UnbornBranch | ErrorCode::NotFound) => {
+            return Ok(None);
+        }
+        Err(error) => return Err(format!("cannot resolve HEAD: {error}")),
+    };
+    let tree = head
+        .peel_to_tree()
+        .map_err(|error| format!("cannot read HEAD tree: {error}"))?;
+
+    match tree.get_path(path) {
+        Ok(entry) => {
+            let object = entry
+                .to_object(repository)
+                .map_err(|error| format!("cannot read HEAD blob: {error}"))?;
+            Ok(object.as_blob().map(|blob| blob.content().to_vec()))
+        }
+        Err(error) if error.code() == ErrorCode::NotFound => Ok(None),
+        Err(error) => Err(format!("cannot read HEAD tree: {error}")),
+    }
+}
+
+fn lines_equivalent_ignoring_whitespace(left: &[u8], right: &[u8]) -> bool {
+    let left = split_lines(left);
+    let right = split_lines(right);
+    left.len() == right.len()
+        && left.iter().zip(right).all(|(left, right)| {
+            left.iter()
+                .filter(|byte| !byte.is_ascii_whitespace())
+                .eq(right.iter().filter(|byte| !byte.is_ascii_whitespace()))
+        })
+}
+
 fn path_in_head(repository: &Repository, path: &std::path::Path) -> Result<bool, String> {
     let head = match repository.head() {
         Ok(head) => head,
         Err(error) if matches!(error.code(), ErrorCode::UnbornBranch | ErrorCode::NotFound) => {
-            return Err(format!("cannot resolve HEAD: {error}"));
+            return Ok(false);
         }
         Err(error) => return Err(format!("cannot resolve HEAD: {error}")),
     };
@@ -394,19 +479,16 @@ fn attribute_hunk(
     }
 
     let start = hunk.final_start_line().saturating_sub(1);
-    let line_count = hunk.lines_in_hunk();
+    let count = counts.entry(line_author.author).or_default();
 
-    for offset in 0..line_count {
-        let index = start + offset;
-        if config.ignore_blank {
-            match lines.get(index) {
-                Some(line) if String::from_utf8_lossy(line).trim().is_empty() => continue,
-                None => continue,
-                _ => {}
-            }
+    for offset in 0..hunk.lines_in_hunk() {
+        let Some(line) = lines.get(start + offset) else {
+            continue;
+        };
+        if config.ignore_blank && is_blank(line) {
+            continue;
         }
 
-        let count = counts.entry(line_author.author.clone()).or_default();
         *count += 1;
     }
 }
@@ -449,6 +531,28 @@ mod tests {
     fn normalizes_crlf_only() {
         assert_eq!(normalize_crlf(b"a\r\nb\rc\n"), b"a\nb\rc\n");
         assert_eq!(normalize_crlf(b"no newline"), b"no newline");
+    }
+
+    #[test]
+    fn compares_lines_ignoring_whitespace() {
+        assert!(lines_equivalent_ignoring_whitespace(
+            b"a b\nc\n",
+            b"a  b\n c \n"
+        ));
+        assert!(!lines_equivalent_ignoring_whitespace(b"a b\nc\n", b"a b\n"));
+        assert!(!lines_equivalent_ignoring_whitespace(
+            b"a b\nc\n",
+            b"a x\nc\n"
+        ));
+    }
+
+    #[test]
+    fn detects_blank_lines() {
+        assert!(is_blank(b""));
+        assert!(is_blank(b" \t\r"));
+        assert!(!is_blank(b"x"));
+        assert!(!is_blank(b" x "));
+        assert!(is_blank("\u{00a0}".as_bytes()));
     }
 
     #[test]

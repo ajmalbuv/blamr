@@ -1,7 +1,7 @@
-mod fixtures;
+mod common;
 
 use assert_cmd::Command;
-use fixtures::{TestRepo, assert_success, json, run, run_at, stderr, stdout};
+use common::{TestRepo, assert_success, json, run, run_at, stderr, stdout};
 use pretty_assertions::assert_eq;
 #[test]
 fn table_and_json_match_expected_contract() {
@@ -11,7 +11,7 @@ fn table_and_json_match_expected_contract() {
 
     let output = run(&repo, &[]);
     assert_success(&output);
-    let expected = "\n\n─────────────────────────────────────────────\nAuthor                       Lines        %\n─────────────────────────────────────────────\nAlice                            2    66.7%  █████████████\nBob                              1    33.3%  ██████\n─────────────────────────────────────────────\nTotal                            3\n";
+    let expected = "─────────────────────────────────────────────\nAuthor                       Lines        %\n─────────────────────────────────────────────\nAlice                            2    66.7%  █████████████\nBob                              1    33.3%  ██████\n─────────────────────────────────────────────\nTotal                            3\n";
     assert_eq!(stdout(&output), expected);
     assert_eq!(stderr(&output), "");
 
@@ -145,13 +145,16 @@ fn staged_new_and_no_head_files_are_handled() {
     let empty_repo = TestRepo::new();
     empty_repo.write("new.txt", "new\n");
     empty_repo.stage("new.txt");
-    let output = run(&empty_repo, &[]);
-    assert_success(&output);
-    assert_eq!(
-        stdout(&output),
-        "no text files found tracked in this repo\n"
-    );
-    assert!(stderr(&output).contains("warning: blame new.txt: cannot resolve HEAD:"));
+    let value = json(&run(&empty_repo, &["-json"]));
+    assert_eq!(value["total_files"], 1);
+    assert_eq!(value["total_lines"], 1);
+    assert_eq!(value["authors"][0]["author"], "Not Committed Yet");
+    assert_eq!(value["authors"][0]["lines"], 1);
+
+    let value = json(&run(&empty_repo, &["-json", "-committed-only"]));
+    assert_eq!(value["total_files"], 1);
+    assert_eq!(value["total_lines"], 0);
+    assert_eq!(value["authors"], serde_json::json!([]));
 }
 
 #[test]
@@ -261,6 +264,43 @@ fn blank_filtering_unicode_and_mailmap() {
 }
 
 #[test]
+fn ascii_output_uses_only_ascii_glyphs() {
+    let repo = TestRepo::new();
+    repo.commit_file("a.txt", "one\n", "Alice", "alice@example.com", "a");
+
+    let output = run(&repo, &["-ascii"]);
+    assert_success(&output);
+    let text = stdout(&output);
+    assert!(text.is_ascii());
+    assert!(text.contains('#'));
+    assert!(!text.contains('─'));
+    assert_eq!(stderr(&output), "");
+}
+
+#[test]
+fn whitespace_only_commits_are_opt_in() {
+    let repo = TestRepo::new();
+    repo.commit_file("ws.txt", "one  two\n", "Alice", "alice@example.com", "base");
+    repo.commit_file("ws.txt", "one two\n", "Bob", "bob@example.com", "reindent");
+
+    let value = json(&run(&repo, &["-json"]));
+    assert_eq!(value["total_lines"], 1);
+    assert_eq!(value["authors"][0]["author"], "Bob");
+    assert_eq!(value["authors"][0]["lines"], 1);
+
+    let value = json(&run(&repo, &["-json", "-ignore-whitespace"]));
+    assert_eq!(value["total_lines"], 1);
+    assert_eq!(value["authors"][0]["author"], "Alice");
+    assert_eq!(value["authors"][0]["lines"], 1);
+
+    repo.write("ws.txt", "one  two\n");
+    let value = json(&run(&repo, &["-json"]));
+    assert_eq!(value["authors"][0]["author"], "Not Committed Yet");
+    let value = json(&run(&repo, &["-json", "-ignore-whitespace"]));
+    assert_eq!(value["authors"][0]["author"], "Alice");
+}
+
+#[test]
 fn autocrlf_worktree_bytes_are_normalized_for_blame() {
     let repo = TestRepo::new();
     repo.set_autocrlf(true);
@@ -281,14 +321,14 @@ fn autocrlf_worktree_bytes_are_normalized_for_blame() {
 }
 
 #[test]
-fn help_version_parse_errors_and_both_binaries() {
+fn help_version_and_parse_errors() {
     let repo = TestRepo::new();
     let output = run(&repo, &["-h"]);
     assert_success(&output);
-    assert_eq!(stdout(&output), "");
-    assert!(stderr(&output).starts_with(
+    assert!(stdout(&output).starts_with(
         "blamr: concurrent git-blame author attribution and line statistics\n\nUsage:\n"
     ));
+    assert_eq!(stderr(&output), "");
 
     for args in [
         &["-j=abc"][..],
@@ -307,14 +347,6 @@ fn help_version_parse_errors_and_both_binaries() {
     assert!(stdout(&output).starts_with("blamr version "));
     assert!(stdout(&output).contains(" ("));
     let output = run(&repo, &["-version", "-v=false"]);
-    assert_success(&output);
-    assert!(stdout(&output).starts_with("blamr version "));
-
-    let output = Command::cargo_bin("git-blamr")
-        .unwrap()
-        .arg("-version")
-        .output()
-        .unwrap();
     assert_success(&output);
     assert!(stdout(&output).starts_with("blamr version "));
 }

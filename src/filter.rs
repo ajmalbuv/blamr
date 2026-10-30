@@ -34,25 +34,30 @@ pub fn matches_extensions(path: &str, extensions: &[String]) -> bool {
     if extensions.is_empty() {
         return true;
     }
-    let lower = path.to_lowercase();
     extensions
         .iter()
-        .any(|extension| lower.ends_with(extension))
+        .any(|extension| ends_with_ignore_ascii_case(path, extension))
 }
 
 pub fn is_generated_file(path: &str) -> bool {
-    let name = base_name(path).to_lowercase();
-    GENERATED_FILES.contains(&name.as_str())
+    let name = base_name(path);
+    GENERATED_FILES
+        .iter()
+        .any(|generated| name.eq_ignore_ascii_case(generated))
 }
 
 pub fn is_minified_or_map(path: &str) -> bool {
-    let name = base_name(path).to_lowercase();
-    name.ends_with(".min.js") || name.ends_with(".min.css") || name.ends_with(".map")
+    let name = base_name(path);
+    ends_with_ignore_ascii_case(name, ".min.js")
+        || ends_with_ignore_ascii_case(name, ".min.css")
+        || ends_with_ignore_ascii_case(name, ".map")
 }
 
 pub fn is_binary_extension(path: &str) -> bool {
-    let extension = git_extension(path);
-    BINARY_EXTENSIONS.contains(&extension.as_str())
+    let name = base_name(path);
+    BINARY_EXTENSIONS
+        .iter()
+        .any(|extension| ends_with_ignore_ascii_case(name, extension))
 }
 
 pub fn is_binary_data(data: &[u8]) -> bool {
@@ -103,14 +108,10 @@ fn base_name(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)
 }
 
-// Use Git path semantics for extensions: the extension includes the final
-// dot, even for dotfiles such as `.png`.
-fn git_extension(path: &str) -> String {
-    let name = base_name(path);
-    match name.rfind('.') {
-        Some(index) => name[index..].to_lowercase(),
-        None => String::new(),
-    }
+fn ends_with_ignore_ascii_case(value: &str, suffix: &str) -> bool {
+    let value = value.as_bytes();
+    let suffix = suffix.as_bytes();
+    value.len() >= suffix.len() && value[value.len() - suffix.len()..].eq_ignore_ascii_case(suffix)
 }
 
 #[cfg(test)]

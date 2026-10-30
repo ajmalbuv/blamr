@@ -1,6 +1,6 @@
 [package]
 name = "blamr"
-version = "0.0.3"
+version = "0.0.4"
 edition = "2024"
 rust-version = "1.88"
 description = "Concurrent git-blame author attribution and line statistics"
@@ -14,6 +14,10 @@ git2 = { version = "0.21", default-features = false, features = ["vendored-libgi
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 crossbeam-channel = "0.5"
+unicode-width = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_System_Console"] }
 
 [dev-dependencies]
 assert_cmd = "2"
@@ -23,10 +27,6 @@ pretty_assertions = "1"
 [[bin]]
 name = "blamr"
 path = "src/bin/blamr.rs"
-
-[[bin]]
-name = "git-blamr"
-path = "src/bin/git-blamr.rs"
 
 [package.metadata.binstall]
 pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ target }.tar.gz"
@@ -38,7 +38,24 @@ pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ target }.zip"
 bin-dir = "{ bin }{ binary-ext }"
 pkg-fmt = "zip"
 
+# Release archives only contain the static musl build on Linux. Make glibc
+# hosts resolve to those archives instead of looking for a nonexistent gnu
+# artifact.
+[package.metadata.binstall.overrides.x86_64-unknown-linux-gnu]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-x86_64-unknown-linux-musl.tar.gz"
+bin-dir = "{ name }-x86_64-unknown-linux-musl/{ bin }{ binary-ext }"
+pkg-fmt = "tgz"
+
+[package.metadata.binstall.overrides.aarch64-unknown-linux-gnu]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-aarch64-unknown-linux-musl.tar.gz"
+bin-dir = "{ name }-aarch64-unknown-linux-musl/{ bin }{ binary-ext }"
+pkg-fmt = "tgz"
+
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+
 # The profile that 'dist' will build with
 [profile.dist]
 inherits = "release"
-lto = "fat"

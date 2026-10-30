@@ -17,9 +17,11 @@ pub fn run() -> i32 {
     let mut stderr = io::stderr().lock();
     let config = match config::parse(&args, default_workers, &mut stderr) {
         Ok(config) => config,
-        Err(ParseError::Help) => return 0,
-        Err(ParseError::Message(message)) => {
-            let _ = writeln!(stderr, "error: {message}");
+        Err(ParseError::Help) => {
+            drop(stderr);
+            return print_help(default_workers);
+        }
+        Err(ParseError::Message(_)) => {
             return 2;
         }
     };
@@ -37,15 +39,31 @@ pub fn run() -> i32 {
         }
     };
 
-    let is_tty = io::stdout().is_terminal();
-    let json_output = config.json_output;
+    let stdout_tty = io::stdout().is_terminal();
+    let stderr_tty = io::stderr().is_terminal();
+    let ascii = config.ascii || !output::unicode_supported(stdout_tty);
+    let progress_enabled = stderr_tty && !config.json_output && !config.no_progress;
+    let mut progress = output::Progress::new(progress_enabled, output::terminal_width());
+    let mut stderr = io::stderr().lock();
 
-    let stats = match blame::blame_files(&config, files, |done, total, file| {
-        if !json_output {
-            let mut stdout = io::stdout();
-            let _ = output::print_progress(&mut stdout, done, total, file, is_tty);
+    let result = blame::blame_files(&config, files, |event| match event {
+        blame::BlameEvent::Progress { done, total, path } => {
+            let _ = progress.update(&mut stderr, done, total, path);
         }
-    }) {
+        blame::BlameEvent::Warning { path, message } => {
+            let _ = progress.clear(&mut stderr);
+            let _ = writeln!(
+                stderr,
+                "warning: blame {}: {}",
+                output::sanitize_terminal(path),
+                output::sanitize_terminal(message)
+            );
+        }
+    });
+    let _ = progress.finish(&mut stderr);
+    drop(stderr);
+
+    let stats = match result {
         Ok(stats) => stats,
         Err(error) => {
             eprintln!("error: {error}");
@@ -74,7 +92,26 @@ pub fn run() -> i32 {
     }
 
     let mut stdout = io::stdout();
-    match output::print_table(&mut stdout, &stats) {
+    match output::print_table(
+        &mut stdout,
+        &stats,
+        output::TableOptions {
+            ascii,
+            by_email: config.by_email,
+        },
+    ) {
+        Ok(()) => 0,
+        Err(error) if is_broken_pipe(&error) => 0,
+        Err(error) => {
+            eprintln!("error: cannot write output: {error}");
+            1
+        }
+    }
+}
+
+fn print_help(default_workers: usize) -> i32 {
+    let mut stdout = io::stdout();
+    match stdout.write_all(config::help_text(default_workers).as_bytes()) {
         Ok(()) => 0,
         Err(error) if is_broken_pipe(&error) => 0,
         Err(error) => {
