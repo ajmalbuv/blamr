@@ -5,6 +5,22 @@ use std::collections::HashSet;
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Once;
+
+static INIT_GIT_CACHE: Once = Once::new();
+
+pub fn init_git_cache() {
+    INIT_GIT_CACHE.call_once(|| {
+        // Increase libgit2's object cache limits so tree objects (>4KB default)
+        // and commit descriptors are retained across worker threads instead
+        // of constantly re-reading and decompressing from disk packfiles.
+        unsafe {
+            let _ = git2::opts::set_cache_object_limit(git2::ObjectType::Tree, 10 * 1024 * 1024);
+            let _ = git2::opts::set_cache_object_limit(git2::ObjectType::Commit, 1024 * 1024);
+            let _ = git2::opts::set_cache_max_size(512 * 1024 * 1024);
+        }
+    });
+}
 
 #[derive(Debug, Clone)]
 pub struct TrackedPath {
@@ -27,6 +43,7 @@ impl TrackedPath {
 }
 
 pub fn open_repository() -> Result<Repository, String> {
+    init_git_cache();
     Repository::open_from_env()
         .map_err(|error| format!("not a git repo (or repository discovery failed): {error}"))
 }

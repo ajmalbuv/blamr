@@ -1,6 +1,6 @@
 [package]
 name = "blamr"
-version = "0.0.5"
+version = "0.0.6"
 edition = "2024"
 rust-version = "1.88"
 description = "Concurrent git-blame author attribution and line statistics"
@@ -27,6 +27,10 @@ pretty_assertions = "1"
 [[bin]]
 name = "blamr"
 path = "src/bin/blamr.rs"
+
+[[bin]]
+name = "git-blamr"
+path = "src/bin/git-blamr.rs"
 
 [package.metadata.binstall]
 pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ target }.tar.gz"

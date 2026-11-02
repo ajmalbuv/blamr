@@ -9,26 +9,20 @@
 `blamr` is a local-only Git authorship and line-statistics tool. It embeds libgit2, so the
 released binaries never invoke a `git` executable and do not require Git to be installed.
 
-Every release ships a single `blamr` binary. The shell and PowerShell installers also create a
-`git-blamr` alias so `git blamr` works. Archive downloads contain only `blamr`; create a symlink
-or hardlink named `git-blamr` yourself if you want the Git subcommand.
+Both binaries are included in every release:
+
+- `blamr`: standalone command.
+- `git-blamr`: Git subcommand entry point, invoked as `git blamr`.
 
 ## Installation
 
 ### Prebuilt binaries
 
 Download the archive for your platform from
-[GitHub Releases](https://github.com/ajmalbuv/blamr/releases), extract the single `blamr`
-binary, and put it on `PATH`. To use `git blamr`, also create a symlink or hardlink named
-`git-blamr` pointing at `blamr`.
+[GitHub Releases](https://github.com/ajmalbuv/blamr/releases), extract it, and put both
+`blamr` and `git-blamr` on `PATH`.
 
-For example, after extracting `blamr` to a directory on `PATH`:
-
-```console
-ln -s blamr git-blamr
-```
-
-Linux and macOS installers are also published with every release, and create the alias for you:
+Linux and macOS installers are also published with every release:
 
 ```console
 curl --proto '=https' --tlsv1.2 -LsSf https://github.com/ajmalbuv/blamr/releases/latest/download/blamr-installer.sh | sh
@@ -50,9 +44,8 @@ glibc build is published. macOS x86_64 and arm64 archives are separate.
 cargo binstall blamr
 ```
 
-This installs the prebuilt binary from GitHub Releases without compiling. On glibc Linux hosts it
-resolves to the static musl archive. Like `cargo install`, it installs only `blamr`; create the
-`git-blamr` alias manually if you need `git blamr`.
+This installs the prebuilt binaries from GitHub Releases without compiling. On glibc Linux hosts it
+resolves to the static musl archive. Both `blamr` and `git-blamr` are installed.
 
 ### crates.io
 

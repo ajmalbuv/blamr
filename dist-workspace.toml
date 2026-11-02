@@ -26,11 +26,6 @@ hosting = "github"
 # Whether to install an updater program
 install-updater = false
 
-# Installers create a `git-blamr` alias so `git blamr` works without shipping
-# a second copy of the static binary. Archives contain only `blamr`.
-[dist.bin-aliases]
-blamr = ["git-blamr"]
-
 # Custom permissions for the crates.io publish job
 [dist.github-custom-job-permissions.publish-crates]
 contents = "read"

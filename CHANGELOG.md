@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## 0.0.6 - 2026-10-30
+
+### Fixed
+
+- Restore the `git-blamr` binary target so `cargo install blamr`, `cargo binstall blamr`, and archive extractions install both `blamr` and `git-blamr` directly.
+- Increase libgit2 tree and commit object cache limits to prevent cache thrashing and stalls on large repositories.
+
 ## 0.0.5 - 2026-10-30
 
 - Updated transitive dependecies

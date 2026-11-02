@@ -349,6 +349,14 @@ fn help_version_and_parse_errors() {
     let output = run(&repo, &["-version", "-v=false"]);
     assert_success(&output);
     assert!(stdout(&output).starts_with("blamr version "));
+
+    let output = Command::cargo_bin("git-blamr")
+        .unwrap()
+        .arg("-version")
+        .output()
+        .unwrap();
+    assert_success(&output);
+    assert!(stdout(&output).starts_with("blamr version "));
 }
 
 #[test]
