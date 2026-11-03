@@ -1,32 +1,17 @@
 use crate::config::Config;
 use crate::filter;
-use git2::Repository;
+use rayon::prelude::*;
 use std::collections::HashSet;
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
-use std::sync::Once;
-
-static INIT_GIT_CACHE: Once = Once::new();
-
-pub fn init_git_cache() {
-    INIT_GIT_CACHE.call_once(|| {
-        // Increase libgit2's object cache limits so tree objects (>4KB default)
-        // and commit descriptors are retained across worker threads instead
-        // of constantly re-reading and decompressing from disk packfiles.
-        unsafe {
-            let _ = git2::opts::set_cache_object_limit(git2::ObjectType::Tree, 10 * 1024 * 1024);
-            let _ = git2::opts::set_cache_object_limit(git2::ObjectType::Commit, 1024 * 1024);
-            let _ = git2::opts::set_cache_max_size(512 * 1024 * 1024);
-        }
-    });
-}
 
 #[derive(Debug, Clone)]
 pub struct TrackedPath {
     pub display_path: String,
     pub fs_path: PathBuf,
     pub relative_path: PathBuf,
+    #[allow(dead_code)]
     pub conflicted: bool,
 }
 
@@ -42,9 +27,9 @@ impl TrackedPath {
     }
 }
 
-pub fn open_repository() -> Result<Repository, String> {
-    init_git_cache();
-    Repository::open_from_env()
+pub fn open_repository() -> Result<gix::Repository, String> {
+    let cwd = std::env::current_dir().map_err(|error| format!("cannot determine CWD: {error}"))?;
+    gix::discover_with_environment_overrides(&cwd)
         .map_err(|error| format!("not a git repo (or repository discovery failed): {error}"))
 }
 
@@ -61,19 +46,37 @@ pub fn collect_tracked(config: &Config) -> Result<Vec<TrackedPath>, String> {
     let cwd_prefix = cwd.strip_prefix(&workdir).ok().map(path_to_git_string);
     let explicit = explicit_paths(&config.paths, &cwd, &workdir)?;
 
-    let index = repo
-        .index()
-        .map_err(|error| format!("cannot open repository index: {error}"))?;
+    let index = if let Some(index_path) = std::env::var_os("GIT_INDEX_FILE") {
+        gix::index::File::at(
+            Path::new(&index_path),
+            repo.object_hash(),
+            false,
+            Default::default(),
+        )
+        .map_err(|error| format!("cannot open repository index: {error}"))?
+    } else {
+        repo.open_index()
+            .map_err(|error| format!("cannot open repository index: {error}"))?
+    };
 
-    let mut tracked = Vec::new();
+    struct Candidate {
+        git_path: String,
+        relative_path: PathBuf,
+        fs_path: PathBuf,
+        display_path: String,
+        conflicted: bool,
+    }
+
+    let mut candidates = Vec::new();
     let mut seen = HashSet::new();
 
-    for entry in index.iter() {
-        if entry.path.is_empty() || !seen.insert(entry.path.clone()) {
+    for entry in index.entries() {
+        let path_bytes = entry.path(&index);
+        if path_bytes.is_empty() || !seen.insert(path_bytes.to_vec()) {
             continue;
         }
 
-        let git_path = String::from_utf8_lossy(&entry.path).into_owned();
+        let git_path = String::from_utf8_lossy(path_bytes).into_owned();
         if !explicit.is_empty() && !explicit.iter().any(|base| path_matches(&git_path, base)) {
             continue;
         }
@@ -85,25 +88,41 @@ pub fn collect_tracked(config: &Config) -> Result<Vec<TrackedPath>, String> {
             continue;
         }
 
-        let relative_path = git_path_to_native(&entry.path);
+        let relative_path = git_path_to_native(path_bytes);
         let fs_path = workdir.join(&relative_path);
 
-        if config.extensions.is_empty() {
-            if filter::should_skip(&fs_path, &git_path) {
-                continue;
-            }
-        } else if !filter::matches_extensions(&git_path, &config.extensions) {
+        if !config.extensions.is_empty()
+            && !filter::matches_extensions(&git_path, &config.extensions)
+        {
             continue;
         }
 
         let display_path = display_path(&git_path, cwd_prefix.as_deref());
-        tracked.push(TrackedPath {
-            display_path,
-            fs_path,
+        let conflicted = entry.stage_raw() > 0;
+        candidates.push(Candidate {
+            git_path,
             relative_path,
-            conflicted: entry.flags & 0x3000 != 0,
+            fs_path,
+            display_path,
+            conflicted,
         });
     }
+
+    // Filter in parallel with Rayon - eliminates 5-10s NTFS sequential stat stall on monorepos
+    let tracked: Vec<TrackedPath> = candidates
+        .into_par_iter()
+        .filter_map(|cand| {
+            if config.extensions.is_empty() && filter::should_skip(&cand.fs_path, &cand.git_path) {
+                return None;
+            }
+            Some(TrackedPath {
+                display_path: cand.display_path,
+                fs_path: cand.fs_path,
+                relative_path: cand.relative_path,
+                conflicted: cand.conflicted,
+            })
+        })
+        .collect();
 
     Ok(tracked)
 }
@@ -197,7 +216,7 @@ fn strip_verbatim(path: &Path) -> PathBuf {
     }
 }
 
-fn path_matches(git_path: &str, base: &str) -> bool {
+pub fn path_matches(git_path: &str, base: &str) -> bool {
     if base.is_empty() {
         return true;
     }
@@ -207,7 +226,7 @@ fn path_matches(git_path: &str, base: &str) -> bool {
             .is_some_and(|rest| rest.starts_with('/'))
 }
 
-fn display_path(git_path: &str, cwd_prefix: Option<&str>) -> String {
+pub fn display_path(git_path: &str, cwd_prefix: Option<&str>) -> String {
     let Some(prefix) = cwd_prefix else {
         return git_path.to_owned();
     };
@@ -238,7 +257,7 @@ fn display_path(git_path: &str, cwd_prefix: Option<&str>) -> String {
     }
 }
 
-fn git_path_to_native(raw: &[u8]) -> PathBuf {
+pub fn git_path_to_native(raw: &[u8]) -> PathBuf {
     #[cfg(unix)]
     {
         use std::ffi::OsStr;
@@ -256,7 +275,7 @@ fn git_path_to_native(raw: &[u8]) -> PathBuf {
     }
 }
 
-fn path_to_git_string(path: &Path) -> String {
+pub fn path_to_git_string(path: &Path) -> String {
     path.components()
         .filter_map(|component| match component {
             Component::Normal(value) => Some(value.to_string_lossy().into_owned()),
@@ -266,7 +285,7 @@ fn path_to_git_string(path: &Path) -> String {
         .join("/")
 }
 
-fn path_to_git_bytes(path: &Path) -> Vec<u8> {
+pub fn path_to_git_bytes(path: &Path) -> Vec<u8> {
     #[cfg(unix)]
     {
         use std::os::unix::ffi::OsStrExt;

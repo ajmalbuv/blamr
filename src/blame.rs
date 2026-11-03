@@ -1,10 +1,10 @@
 use crate::config::Config;
-use crate::git::{TrackedPath, open_repository};
+use crate::diff_overlay;
+use crate::git::{TrackedPath, open_repository, path_to_git_string};
 use crate::stats::Stats;
 use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
-use git2::{Blame, BlameOptions, ErrorCode, Oid, Repository};
+use gix::bstr::ByteSlice;
 use std::collections::HashMap;
-use std::fs;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::thread;
 
@@ -38,6 +38,9 @@ where
         return Ok(Stats::empty());
     }
 
+    let repo = open_repository()?;
+    let sync_repo = repo.into_sync();
+
     let workers = config.workers.max(1).min(total);
     let job_capacity = workers.saturating_mul(2).max(1);
     let (job_tx, job_rx) = bounded::<TrackedPath>(job_capacity);
@@ -48,20 +51,25 @@ where
         let jobs = job_rx.clone();
         let events = event_tx.clone();
         let config = config.clone();
+        let sync_repo = sync_repo.clone();
         let handle = thread::Builder::new()
             .name(format!("blamr-worker-{index}"))
-            .spawn(move || worker_loop(&config, &jobs, &events))
+            .spawn(move || worker_loop(&sync_repo, &config, &jobs, &events))
             .map_err(|error| format!("cannot start worker thread: {error}"))?;
         handles.push(handle);
     }
     drop(event_tx);
 
-    for file in files {
-        job_tx
-            .send(file)
-            .map_err(|error| format!("cannot queue blame job: {error}"))?;
-    }
-    drop(job_tx);
+    let feeder = thread::Builder::new()
+        .name("blamr-feeder".to_owned())
+        .spawn(move || {
+            for file in files {
+                if job_tx.send(file).is_err() {
+                    break;
+                }
+            }
+        })
+        .map_err(|error| format!("cannot start feeder thread: {error}"))?;
     drop(job_rx);
 
     let mut counts: HashMap<String, u64> = HashMap::new();
@@ -91,6 +99,7 @@ where
         }
     }
 
+    let _ = feeder.join();
     for handle in handles {
         if handle.join().is_err() {
             eprintln!("warning: a blame worker thread terminated unexpectedly");
@@ -100,24 +109,32 @@ where
     Ok(Stats::from_counts(counts, succeeded))
 }
 
-fn worker_loop(config: &Config, jobs: &Receiver<TrackedPath>, events: &Sender<Event>) {
-    let mut repository: Option<Repository> = None;
-    let mut normalize_crlf: Option<bool> = None;
+fn worker_loop(
+    sync_repo: &gix::ThreadSafeRepository,
+    config: &Config,
+    jobs: &Receiver<TrackedPath>,
+    events: &Sender<Event>,
+) {
+    let repo = sync_repo.to_thread_local();
+    let mailmap = repo.open_mailmap();
+    let normalize_crlf = should_normalize_crlf(&repo);
+    let head_commit = repo.head_commit().ok();
+    let head_tree = head_commit.as_ref().and_then(|c| c.tree().ok());
+    let mut author_cache: HashMap<gix::ObjectId, String> = HashMap::new();
 
     while let Ok(file) = jobs.recv() {
         let display_path = file.display_path.clone();
 
         let result = catch_unwind(AssertUnwindSafe(|| {
-            if repository.is_none() {
-                let opened = open_repository()?;
-                normalize_crlf = Some(should_normalize_crlf(&opened));
-                repository = Some(opened);
-            }
             blame_worktree(
-                repository.as_ref().unwrap(),
+                &repo,
+                &mailmap,
+                head_commit.as_ref(),
+                head_tree.as_ref(),
+                &mut author_cache,
                 config,
                 &file,
-                normalize_crlf.unwrap_or(false),
+                normalize_crlf,
             )
         }))
         .unwrap_or_else(|_| Err("internal worker panic".to_owned()));
@@ -135,204 +152,175 @@ fn worker_loop(config: &Config, jobs: &Receiver<TrackedPath>, events: &Sender<Ev
 }
 
 fn blame_worktree(
-    repository: &Repository,
+    repo: &gix::Repository,
+    mailmap: &gix::mailmap::Snapshot,
+    head_commit: Option<&gix::Commit<'_>>,
+    head_tree: Option<&gix::Tree<'_>>,
+    author_cache: &mut HashMap<gix::ObjectId, String>,
     config: &Config,
     file: &TrackedPath,
     normalize_crlf_enabled: bool,
 ) -> Result<HashMap<String, u64>, String> {
-    let contents = file
+    let raw_contents = file
         .read_worktree()
         .map_err(|error| format!("cannot read worktree file: {error}"))?;
 
-    let in_head = path_in_head(repository, &file.relative_path)?;
-
-    if contents.is_empty() {
+    if raw_contents.is_empty() {
         return Ok(HashMap::new());
     }
 
-    let lines = split_lines(&contents);
-    let normalized;
-    let buffer = if normalize_crlf_enabled {
-        normalized = normalize_crlf(&contents);
-        normalized.as_slice()
+    let contents = if normalize_crlf_enabled {
+        normalize_crlf(&raw_contents)
     } else {
-        contents.as_slice()
-    };
-    let merge_oid = if file.conflicted {
-        merge_head_oid(repository)
-    } else {
-        None
+        raw_contents
     };
 
-    let merge_has_path = match merge_oid {
-        Some(commit) => commit_has_path(repository, commit, &file.relative_path)?,
-        None => false,
-    };
+    let git_path_str = path_to_git_string(&file.relative_path);
+    let head_entry =
+        head_tree.and_then(|tree| tree.lookup_entry_by_path(&git_path_str).ok().flatten());
 
     let mut counts = HashMap::new();
 
-    if !in_head {
-        if let Some(merge_oid) = merge_oid.filter(|_| merge_has_path) {
-            let head_lines = vec![None; lines.len()];
-            let merge_lines = line_authors_at(
-                repository,
-                &file.relative_path,
-                buffer,
-                Some(merge_oid),
-                lines.len(),
-                config,
-            )?;
-            count_conflict_lines(&lines, &head_lines, &merge_lines, config, &mut counts);
-            return Ok(counts);
-        }
-
+    let Some(head_entry) = head_entry else {
         if !config.committed_only {
+            let lines = split_lines(&contents);
             let count = lines
                 .iter()
-                .filter(|line| {
-                    !config.ignore_blank || !String::from_utf8_lossy(line).trim().is_empty()
-                })
+                .filter(|line| !config.ignore_blank || !is_blank(line))
                 .count() as u64;
             if count > 0 {
                 counts.insert(uncommitted_author(config).to_owned(), count);
             }
         }
         return Ok(counts);
-    }
+    };
 
-    if let Some(merge_oid) = merge_oid.filter(|_| merge_has_path) {
-        let head_lines = line_authors_at(
-            repository,
-            &file.relative_path,
-            buffer,
-            None,
-            lines.len(),
-            config,
-        )?;
-        let merge_lines = line_authors_at(
-            repository,
-            &file.relative_path,
-            buffer,
-            Some(merge_oid),
-            lines.len(),
-            config,
-        )?;
-        count_conflict_lines(&lines, &head_lines, &merge_lines, config, &mut counts);
+    let head_commit = head_commit.unwrap();
+    let head_object = head_entry
+        .object()
+        .map_err(|error| format!("cannot read HEAD blob: {error}"))?;
+    let head_blob = head_object.into_blob();
+    let head_bytes = head_blob.data.as_slice();
+
+    let outcome = repo
+        .blame_file(
+            gix::bstr::BStr::new(git_path_str.as_bytes()),
+            head_commit.id,
+            Default::default(),
+        )
+        .map_err(|error| format!("git blame failed: {error}"))?;
+
+    let resolve_author =
+        |commit_id: gix::ObjectId, author_cache: &mut HashMap<gix::ObjectId, String>| -> String {
+            if let Some(author) = author_cache.get(&commit_id) {
+                return author.clone();
+            }
+            let author = match repo.find_object(commit_id) {
+                Ok(obj) => {
+                    let commit = obj.into_commit();
+                    let sig = commit.author().unwrap_or_default();
+                    let resolved = mailmap.resolve(sig);
+                    if config.by_email {
+                        String::from_utf8_lossy(resolved.email.trim()).to_lowercase()
+                    } else {
+                        String::from_utf8_lossy(resolved.name.trim()).into_owned()
+                    }
+                }
+                Err(_) => uncommitted_author(config).to_owned(),
+            };
+            let author = if author.is_empty() {
+                uncommitted_author(config).to_owned()
+            } else {
+                author
+            };
+            author_cache.insert(commit_id, author.clone());
+            author
+        };
+
+    if contents == head_bytes {
+        let lines = split_lines(&contents);
+        for entry in &outcome.entries {
+            let author = resolve_author(entry.commit_id, author_cache);
+            let start = entry.start_in_blamed_file as usize;
+            for offset in 0..(entry.len.get() as usize) {
+                if let Some(line) = lines.get(start + offset) {
+                    if config.ignore_blank && is_blank(line) {
+                        continue;
+                    }
+                    *counts.entry(author.clone()).or_default() += 1;
+                }
+            }
+        }
         return Ok(counts);
     }
 
-    let mut options = BlameOptions::new();
-    options.ignore_whitespace(config.ignore_whitespace);
-    options.use_mailmap(true);
+    let lines = split_lines(&contents);
+    let mapping = diff_overlay::map_worktree_to_head(head_bytes, &contents);
 
-    let blame = repository
-        .blame_file(&file.relative_path, Some(&mut options))
-        .map_err(|error| format!("git blame failed: {error}"))?;
-    // `blame_buffer` maps hunk line numbers against the supplied buffer, so if
-    // the worktree file differs from HEAD only in whitespace the hunk offsets
-    // would be wrong when `ignore_whitespace` is set (libgit2 attributes hunks
-    // by byte position in the HEAD blob, not the buffer). Feeding the HEAD blob
-    // itself when the non-whitespace content is identical keeps the offsets
-    // aligned while still honouring whitespace-agnostic attribution.
-    let head_buffer = if config.ignore_whitespace {
-        head_blob_contents(repository, &file.relative_path)?
-            .filter(|head| lines_equivalent_ignoring_whitespace(head, buffer))
-    } else {
-        None
-    };
-    let buffer_blame = blame
-        .blame_buffer(head_buffer.as_deref().unwrap_or(buffer))
-        .map_err(|error| format!("git blame buffer failed: {error}"))?;
-
-    for hunk in buffer_blame.iter() {
-        attribute_hunk(&hunk, &lines, config, &mut counts);
-    }
-
-    Ok(counts)
-}
-
-fn line_authors_at(
-    repository: &Repository,
-    path: &std::path::Path,
-    buffer: &[u8],
-    newest: Option<Oid>,
-    line_count: usize,
-    config: &Config,
-) -> Result<Vec<Option<LineAuthor>>, String> {
-    let mut options = BlameOptions::new();
-    options.ignore_whitespace(config.ignore_whitespace);
-    options.use_mailmap(true);
-    if let Some(commit) = newest {
-        options.newest_commit(commit);
-    }
-
-    let blame = repository
-        .blame_file(path, Some(&mut options))
-        .map_err(|error| format!("git blame failed for parent: {error}"))?;
-    let buffer_blame = blame
-        .blame_buffer(buffer)
-        .map_err(|error| format!("git blame buffer failed for parent: {error}"))?;
-
-    Ok(line_authors(&buffer_blame, line_count, config))
-}
-
-#[derive(Clone)]
-struct LineAuthor {
-    author: String,
-    committed: bool,
-}
-
-fn line_authors(blame: &Blame<'_>, line_count: usize, config: &Config) -> Vec<Option<LineAuthor>> {
-    let mut lines = vec![None; line_count];
-
-    for hunk in blame.iter() {
-        let Some(author) = hunk_author(&hunk, config) else {
-            continue;
-        };
-        let start = hunk.final_start_line().saturating_sub(1);
-        for offset in 0..hunk.lines_in_hunk() {
-            if let Some(slot) = lines.get_mut(start + offset) {
+    let head_line_count = split_lines(head_bytes).len();
+    let mut head_line_authors: Vec<Option<String>> = vec![None; head_line_count];
+    for entry in &outcome.entries {
+        let author = resolve_author(entry.commit_id, author_cache);
+        let start = entry.start_in_blamed_file as usize;
+        for offset in 0..(entry.len.get() as usize) {
+            if let Some(slot) = head_line_authors.get_mut(start + offset) {
                 *slot = Some(author.clone());
             }
         }
     }
 
-    lines
-}
-
-fn count_conflict_lines(
-    lines: &[&[u8]],
-    head_lines: &[Option<LineAuthor>],
-    merge_lines: &[Option<LineAuthor>],
-    config: &Config,
-    counts: &mut HashMap<String, u64>,
-) {
-    for (index, line) in lines.iter().enumerate() {
+    for (line_idx, line) in lines.iter().enumerate() {
         if config.ignore_blank && is_blank(line) {
             continue;
         }
 
-        let head = head_lines.get(index).and_then(Option::as_ref);
-        let merge = merge_lines.get(index).and_then(Option::as_ref);
-        let committed = head
-            .filter(|author| author.committed)
-            .or_else(|| merge.filter(|author| author.committed));
-        let selected = committed.or(head).or(merge);
-
-        if config.committed_only && !selected.is_some_and(|author| author.committed) {
-            continue;
+        let head_line = mapping.worktree_to_head.get(line_idx).copied().flatten();
+        match head_line {
+            Some(head_idx) => {
+                let author = head_line_authors
+                    .get(head_idx)
+                    .and_then(Option::as_ref)
+                    .cloned()
+                    .unwrap_or_else(|| uncommitted_author(config).to_owned());
+                *counts.entry(author).or_default() += 1;
+            }
+            None => {
+                if !config.committed_only {
+                    *counts
+                        .entry(uncommitted_author(config).to_owned())
+                        .or_default() += 1;
+                }
+            }
         }
-
-        let author = selected
-            .map(|author| author.author.clone())
-            .unwrap_or_else(|| uncommitted_author(config).to_owned());
-        *counts.entry(author).or_default() += 1;
     }
+
+    Ok(counts)
 }
 
-fn merge_head_oid(repository: &Repository) -> Option<Oid> {
-    let contents = fs::read_to_string(repository.path().join("MERGE_HEAD")).ok()?;
-    Oid::from_str(contents.lines().next()?.trim()).ok()
+fn should_normalize_crlf(repo: &gix::Repository) -> bool {
+    let config = repo.config_snapshot();
+    if config.boolean("core.autocrlf").unwrap_or(false) {
+        return true;
+    }
+    config
+        .string("core.autocrlf")
+        .map(|val| val.as_bytes().eq_ignore_ascii_case(b"input"))
+        .unwrap_or(false)
+}
+
+fn normalize_crlf(contents: &[u8]) -> Vec<u8> {
+    let mut normalized = Vec::with_capacity(contents.len());
+    let mut index = 0;
+    while index < contents.len() {
+        if contents[index] == b'\r' && contents.get(index + 1) == Some(&b'\n') {
+            normalized.push(b'\n');
+            index += 2;
+        } else {
+            normalized.push(contents[index]);
+            index += 1;
+        }
+    }
+    normalized
 }
 
 fn uncommitted_author(config: &Config) -> &'static str {
@@ -341,33 +329,6 @@ fn uncommitted_author(config: &Config) -> &'static str {
     } else {
         "Not Committed Yet"
     }
-}
-
-fn hunk_author(hunk: &git2::BlameHunk<'_>, config: &Config) -> Option<LineAuthor> {
-    let uncommitted = hunk.final_commit_id() == Oid::ZERO_SHA1;
-    let author = if uncommitted {
-        uncommitted_author(config).to_owned()
-    } else {
-        let signature = hunk.final_signature()?;
-        if config.by_email {
-            String::from_utf8_lossy(signature.email_bytes())
-                .trim()
-                .to_lowercase()
-        } else {
-            String::from_utf8_lossy(signature.name_bytes())
-                .trim()
-                .to_owned()
-        }
-    };
-
-    if author.is_empty() {
-        return None;
-    }
-
-    Some(LineAuthor {
-        author,
-        committed: !uncommitted,
-    })
 }
 
 fn split_lines(contents: &[u8]) -> Vec<&[u8]> {
@@ -388,141 +349,6 @@ fn is_blank(line: &[u8]) -> bool {
     String::from_utf8_lossy(line).trim().is_empty()
 }
 
-fn commit_has_path(
-    repository: &Repository,
-    commit: Oid,
-    path: &std::path::Path,
-) -> Result<bool, String> {
-    let commit = repository
-        .find_commit(commit)
-        .map_err(|error| format!("cannot read merge parent: {error}"))?;
-    let tree = commit
-        .tree()
-        .map_err(|error| format!("cannot read merge parent tree: {error}"))?;
-
-    match tree.get_path(path) {
-        Ok(_) => Ok(true),
-        Err(error) if error.code() == ErrorCode::NotFound => Ok(false),
-        Err(error) => Err(format!("cannot read merge parent tree: {error}")),
-    }
-}
-
-fn head_blob_contents(
-    repository: &Repository,
-    path: &std::path::Path,
-) -> Result<Option<Vec<u8>>, String> {
-    let head = match repository.head() {
-        Ok(head) => head,
-        Err(error) if matches!(error.code(), ErrorCode::UnbornBranch | ErrorCode::NotFound) => {
-            return Ok(None);
-        }
-        Err(error) => return Err(format!("cannot resolve HEAD: {error}")),
-    };
-    let tree = head
-        .peel_to_tree()
-        .map_err(|error| format!("cannot read HEAD tree: {error}"))?;
-
-    match tree.get_path(path) {
-        Ok(entry) => {
-            let object = entry
-                .to_object(repository)
-                .map_err(|error| format!("cannot read HEAD blob: {error}"))?;
-            Ok(object.as_blob().map(|blob| blob.content().to_vec()))
-        }
-        Err(error) if error.code() == ErrorCode::NotFound => Ok(None),
-        Err(error) => Err(format!("cannot read HEAD tree: {error}")),
-    }
-}
-
-fn lines_equivalent_ignoring_whitespace(left: &[u8], right: &[u8]) -> bool {
-    let left = split_lines(left);
-    let right = split_lines(right);
-    left.len() == right.len()
-        && left.iter().zip(right).all(|(left, right)| {
-            left.iter()
-                .filter(|byte| !byte.is_ascii_whitespace())
-                .eq(right.iter().filter(|byte| !byte.is_ascii_whitespace()))
-        })
-}
-
-fn path_in_head(repository: &Repository, path: &std::path::Path) -> Result<bool, String> {
-    let head = match repository.head() {
-        Ok(head) => head,
-        Err(error) if matches!(error.code(), ErrorCode::UnbornBranch | ErrorCode::NotFound) => {
-            return Ok(false);
-        }
-        Err(error) => return Err(format!("cannot resolve HEAD: {error}")),
-    };
-
-    let tree = head
-        .peel_to_tree()
-        .map_err(|error| format!("cannot read HEAD tree: {error}"))?;
-
-    match tree.get_path(path) {
-        Ok(_) => Ok(true),
-        Err(error) if error.code() == ErrorCode::NotFound => Ok(false),
-        Err(error) => Err(format!("cannot read HEAD tree: {error}")),
-    }
-}
-
-fn attribute_hunk(
-    hunk: &git2::BlameHunk<'_>,
-    lines: &[&[u8]],
-    config: &Config,
-    counts: &mut HashMap<String, u64>,
-) {
-    let Some(line_author) = hunk_author(hunk, config) else {
-        return;
-    };
-    if config.committed_only && !line_author.committed {
-        return;
-    }
-
-    let start = hunk.final_start_line().saturating_sub(1);
-    let count = counts.entry(line_author.author).or_default();
-
-    for offset in 0..hunk.lines_in_hunk() {
-        let Some(line) = lines.get(start + offset) else {
-            continue;
-        };
-        if config.ignore_blank && is_blank(line) {
-            continue;
-        }
-
-        *count += 1;
-    }
-}
-
-fn should_normalize_crlf(repository: &Repository) -> bool {
-    let Ok(config) = repository.config() else {
-        return false;
-    };
-
-    if config.get_bool("core.autocrlf").unwrap_or(false) {
-        return true;
-    }
-
-    config
-        .get_string("core.autocrlf")
-        .map(|value| value.eq_ignore_ascii_case("input"))
-        .unwrap_or(false)
-}
-
-fn normalize_crlf(contents: &[u8]) -> Vec<u8> {
-    let mut normalized = Vec::with_capacity(contents.len());
-    let mut index = 0;
-    while index < contents.len() {
-        if contents[index] == b'\r' && contents.get(index + 1) == Some(&b'\n') {
-            normalized.push(b'\n');
-            index += 2;
-        } else {
-            normalized.push(contents[index]);
-            index += 1;
-        }
-    }
-    normalized
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -531,19 +357,6 @@ mod tests {
     fn normalizes_crlf_only() {
         assert_eq!(normalize_crlf(b"a\r\nb\rc\n"), b"a\nb\rc\n");
         assert_eq!(normalize_crlf(b"no newline"), b"no newline");
-    }
-
-    #[test]
-    fn compares_lines_ignoring_whitespace() {
-        assert!(lines_equivalent_ignoring_whitespace(
-            b"a b\nc\n",
-            b"a  b\n c \n"
-        ));
-        assert!(!lines_equivalent_ignoring_whitespace(b"a b\nc\n", b"a b\n"));
-        assert!(!lines_equivalent_ignoring_whitespace(
-            b"a b\nc\n",
-            b"a x\nc\n"
-        ));
     }
 
     #[test]

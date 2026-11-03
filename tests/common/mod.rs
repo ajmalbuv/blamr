@@ -1,7 +1,6 @@
 #![allow(dead_code)]
 
 use assert_cmd::Command;
-use git2::{IndexAddOption, Oid, Repository, Signature};
 use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -9,20 +8,32 @@ use tempfile::TempDir;
 
 pub struct TestRepo {
     dir: TempDir,
-    repo: Repository,
 }
 
 impl TestRepo {
     pub fn new() -> Self {
         let dir = tempfile::tempdir().unwrap();
-        let repo = Repository::init(dir.path()).unwrap();
-        {
-            let mut config = repo.config().unwrap();
-            config.set_str("user.name", "Test User").unwrap();
-            config.set_str("user.email", "test@example.com").unwrap();
-            config.set_bool("core.autocrlf", false).unwrap();
-        }
-        Self { dir, repo }
+        let repo = Self { dir };
+        repo.git(&["init"]);
+        repo.git(&["config", "user.name", "Test User"]);
+        repo.git(&["config", "user.email", "test@example.com"]);
+        repo.git(&["config", "core.autocrlf", "false"]);
+        repo
+    }
+
+    pub fn git(&self, args: &[&str]) -> std::process::Output {
+        let output = std::process::Command::new("git")
+            .current_dir(self.path())
+            .args(args)
+            .output()
+            .expect("failed to execute git");
+        assert!(
+            output.status.success(),
+            "git {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output
     }
 
     pub fn path(&self) -> &Path {
@@ -30,7 +41,7 @@ impl TestRepo {
     }
 
     pub fn workdir(&self) -> PathBuf {
-        self.repo.workdir().unwrap().to_path_buf()
+        self.dir.path().to_path_buf()
     }
 
     pub fn write(&self, relative: &str, contents: impl AsRef<[u8]>) {
@@ -46,53 +57,31 @@ impl TestRepo {
     }
 
     pub fn stage(&self, relative: &str) {
-        let mut index = self.repo.index().unwrap();
-        index.add_path(Path::new(relative)).unwrap();
-        index.write().unwrap();
+        self.git(&["add", "--", relative]);
     }
 
     pub fn unstage(&self, relative: &str) {
-        let mut index = self.repo.index().unwrap();
-        index.remove_path(Path::new(relative)).unwrap();
-        index.write().unwrap();
-    }
-    pub fn stage_all(&self) {
-        let mut index = self.repo.index().unwrap();
-        index
-            .add_all(["*"].iter(), IndexAddOption::DEFAULT, None)
-            .unwrap();
-        index.write().unwrap();
+        self.git(&["rm", "--cached", "--", relative]);
     }
 
-    pub fn commit(&self, name: &str, email: &str, message: &str) -> Oid {
+    pub fn stage_all(&self) {
+        self.git(&["add", "-A"]);
+    }
+
+    pub fn commit(&self, name: &str, email: &str, message: &str) {
         self.stage_all();
-        let mut index = self.repo.index().unwrap();
-        let tree_id = index.write_tree().unwrap();
-        let tree = self.repo.find_tree(tree_id).unwrap();
-        let signature = Signature::now(name, email).unwrap();
-        let parents = match self.repo.head() {
-            Ok(head) => vec![head.peel_to_commit().unwrap()],
-            Err(error)
-                if matches!(
-                    error.code(),
-                    git2::ErrorCode::NotFound | git2::ErrorCode::UnbornBranch
-                ) =>
-            {
-                Vec::new()
-            }
-            Err(error) => panic!("cannot read HEAD: {error}"),
-        };
-        let parent_refs: Vec<_> = parents.iter().collect();
-        self.repo
-            .commit(
-                Some("HEAD"),
-                &signature,
-                &signature,
-                message,
-                &tree,
-                &parent_refs,
-            )
-            .unwrap()
+        let name_arg = format!("user.name={name}");
+        let email_arg = format!("user.email={email}");
+        let output = std::process::Command::new("git")
+            .current_dir(self.path())
+            .args(&["-c", &name_arg, "-c", &email_arg, "commit", "-m", message])
+            .output()
+            .expect("failed to execute git commit");
+        assert!(
+            output.status.success(),
+            "git commit failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     pub fn commit_file(
@@ -102,18 +91,18 @@ impl TestRepo {
         name: &str,
         email: &str,
         message: &str,
-    ) -> Oid {
+    ) {
         self.write(relative, contents);
         self.stage(relative);
         self.commit(name, email, message)
     }
 
     pub fn set_autocrlf(&self, value: bool) {
-        self.repo
-            .config()
-            .unwrap()
-            .set_bool("core.autocrlf", value)
-            .unwrap();
+        self.git(&[
+            "config",
+            "core.autocrlf",
+            if value { "true" } else { "false" },
+        ]);
     }
 }
 
@@ -122,6 +111,7 @@ impl Default for TestRepo {
         Self::new()
     }
 }
+
 pub fn run(repo: &TestRepo, args: &[&str]) -> std::process::Output {
     Command::cargo_bin("blamr")
         .unwrap()

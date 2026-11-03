@@ -6,8 +6,9 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 ![Build Status](https://github.com/ajmalbuv/blamr/actions/workflows/ci.yml/badge.svg)
 
-`blamr` is a local-only Git authorship and line-statistics tool. It embeds libgit2, so the
-released binaries never invoke a `git` executable and do not require Git to be installed.
+`blamr` is a local-only Git authorship and line-statistics tool. It is written in pure Rust
+using [Gitoxide (`gix`)](https://github.com/GitoxideLabs/gitoxide), so the released binaries
+never invoke a `git` executable and do not require Git to be installed.
 
 Both binaries are included in every release:
 
@@ -53,7 +54,7 @@ resolves to the static musl archive. Both `blamr` and `git-blamr` are installed.
 cargo install blamr
 ```
 
-Compiling from source requires CMake and a C toolchain for the vendored libgit2.
+Compiling from source is 100% pure Rust and does not require CMake or external C toolchains.
 
 Release binaries are unsigned. Windows SmartScreen and macOS Gatekeeper may warn about downloaded
 binaries. There is no notarization, code signing, or WinGet manifest.
@@ -99,7 +100,6 @@ Attribution and output options:
 ```console
 blamr -email             # group by email address
 blamr -ignore-blank      # skip empty and whitespace-only lines
-blamr -ignore-whitespace # attribute whitespace-only changes to the previous author
 blamr -committed-only    # exclude working-tree edits
 blamr -json              # structured JSON
 blamr -ascii             # ASCII-only table/progress output
@@ -115,7 +115,6 @@ blamr -j 4               # worker count
 | `-j <num>` | CPU count | Number of blame workers. Values below 1 use the default. |
 | `-email` | `false` | Group by author email instead of name. |
 | `-ignore-blank` | `false` | Ignore empty and whitespace-only lines. |
-| `-ignore-whitespace` | `false` | Ignore whitespace-only changes when attributing lines, like `git blame -w`. |
 | `-committed-only` | `false` | Exclude uncommitted working-tree changes. |
 | `-json` | `false` | Emit JSON with two-space indentation. |
 | `-ascii` | auto | Use ASCII-only table and progress glyphs. Auto-detected from the terminal. |
@@ -150,6 +149,48 @@ Exit status is 0 on success, 1 for execution failures, and 2 for usage errors.
 `authors` is always an array. If every candidate file is filtered or blame fails, `total_files`
 is 0 and the array is empty.
 
+## Performance on Large Repositories
+
+`blamr` executes blame operations concurrently across threads using [Gitoxide (`gix`)](https://github.com/GitoxideLabs/gitoxide). Gitoxide natively leverages Git's **commit-graph** file and **Changed-Path Bloom filters** (`commitGraph.changedPathsVersion`) to accelerate commit history traversal.
+
+### Importance of Changed-Path Bloom Filters
+
+When attributing line authorship across large repositories with deep histories (e.g., Flutter, Linux kernel, or monorepos with 50,000+ commits):
+
+- **With Bloom filters**: Gitoxide queries the Changed-Path Bloom filter chunk in nanoseconds (~50 ns per commit) to immediately check if a commit modified the target path. Commits that did not alter the file are bypassed instantly without parsing or diffing tree objects. On massive repositories like Flutter (~98,000 commits), this collapses analysis time from **20+ minutes down to under a minute**.
+- **Without Bloom filters**: If the commit-graph is missing or was generated without changed paths, Gitoxide must fall back to reading and diffing historical tree objects across parent commits. For large repositories, this incurs millions of tree-parsing operations that saturate CPU and disk I/O.
+
+### Generating the Commit-Graph
+
+To generate or update the commit-graph with changed-path Bloom filters for your repository:
+
+```console
+git commit-graph write --reachable --changed-paths
+```
+
+To configure Git to automatically maintain changed-path Bloom filters on future commits and maintenance (`git gc`):
+
+```console
+git config commitGraph.changedPathsVersion 1
+git config core.commitGraph true
+```
+
+*(Pass `--global` to apply this setting across all repositories on your system).*
+
+### Verifying Commit-Graph Status
+
+To verify that your commit-graph is valid and reachable:
+
+```console
+git commit-graph verify
+```
+
+To check whether Git is configured to produce Bloom filters:
+
+```console
+git config --get commitGraph.changedPathsVersion
+```
+
 ## Behavior and limitations
 
 `blamr` supports:
@@ -165,7 +206,7 @@ is 0 and the array is empty.
 
 It does not emulate `blame.ignoreRevsFile`, arbitrary clean/smudge filters or textconv drivers,
 pathspec glob or magic syntax, partial-clone lazy fetching, SHA-256 or reftable repositories, or
-every libgit2 repository format extension. Bare repositories are rejected with an error.
+every repository format extension. Bare repositories are rejected with an error.
 Non-UTF-8 paths and author names are handled lossily.
 
 ### Behavior notes
@@ -178,18 +219,18 @@ Non-UTF-8 paths and author names are handled lossily.
 | Unborn branch | current lines are `Not Committed Yet` |
 | Gitlink/submodule | per-file warning; other files continue |
 | Symlink | analyzed as its link blob (target path), not the target file |
-| Whitespace-only edits | `Not Committed Yet` by default; `-ignore-whitespace` keeps the previous author |
+| Whitespace-only edits | `Not Committed Yet` by default; `-committed-only` excludes working-tree changes |
 | Non-ASCII path | preserves the path and may succeed where Git text handling would fail |
 | Progress output | written to stderr; stdout stays clean for tables and JSON |
 | Terminal encoding | Unicode glyphs when supported, ASCII otherwise; `-ascii` forces ASCII |
 | Closed output pipe | exits successfully |
 | Invoked from inside `.git` | finds no tracked files |
 | Invalid UTF-8 path/author bytes | lossy conversion at display and JSON boundaries |
-| libgit2 errors/warnings | libgit2 error text |
+| Git errors/warnings | Gitoxide error text |
 
 ## Building from source
 
-Development builds require Rust 1.88 or newer plus a C toolchain for vendored libgit2. Git is not
+Development builds require Rust 1.88 or newer. Git is not
 needed to run the resulting binary.
 
 ```console

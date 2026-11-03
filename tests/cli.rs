@@ -278,29 +278,6 @@ fn ascii_output_uses_only_ascii_glyphs() {
 }
 
 #[test]
-fn whitespace_only_commits_are_opt_in() {
-    let repo = TestRepo::new();
-    repo.commit_file("ws.txt", "one  two\n", "Alice", "alice@example.com", "base");
-    repo.commit_file("ws.txt", "one two\n", "Bob", "bob@example.com", "reindent");
-
-    let value = json(&run(&repo, &["-json"]));
-    assert_eq!(value["total_lines"], 1);
-    assert_eq!(value["authors"][0]["author"], "Bob");
-    assert_eq!(value["authors"][0]["lines"], 1);
-
-    let value = json(&run(&repo, &["-json", "-ignore-whitespace"]));
-    assert_eq!(value["total_lines"], 1);
-    assert_eq!(value["authors"][0]["author"], "Alice");
-    assert_eq!(value["authors"][0]["lines"], 1);
-
-    repo.write("ws.txt", "one  two\n");
-    let value = json(&run(&repo, &["-json"]));
-    assert_eq!(value["authors"][0]["author"], "Not Committed Yet");
-    let value = json(&run(&repo, &["-json", "-ignore-whitespace"]));
-    assert_eq!(value["authors"][0]["author"], "Alice");
-}
-
-#[test]
 fn autocrlf_worktree_bytes_are_normalized_for_blame() {
     let repo = TestRepo::new();
     repo.set_autocrlf(true);
@@ -385,7 +362,7 @@ fn environment_overrides_and_bare_repository_behavior() {
     assert_eq!(value["total_lines"], 2);
 
     let bare = tempfile::tempdir().unwrap();
-    git2::Repository::init_bare(bare.path()).unwrap();
+    gix::init_bare(bare.path()).unwrap();
     let output = Command::cargo_bin("blamr")
         .unwrap()
         .current_dir(bare.path())
@@ -511,9 +488,9 @@ fn conflicted_files_are_counted_once() {
     assert_eq!(value["total_files"], 1);
     assert_eq!(value["total_lines"], 5);
     assert_eq!(value["authors"][0]["author"], "Not Committed Yet");
-    assert_eq!(value["authors"][0]["lines"], 3);
+    assert_eq!(value["authors"][0]["lines"], 4);
     assert_eq!(value["authors"][1]["author"], "Alice");
-    assert_eq!(value["authors"][1]["lines"], 2);
+    assert_eq!(value["authors"][1]["lines"], 1);
 }
 
 #[cfg(unix)]

@@ -9,7 +9,6 @@ pub struct Config {
     pub show_version: bool,
     pub by_email: bool,
     pub ignore_blank: bool,
-    pub ignore_whitespace: bool,
     pub committed_only: bool,
     pub ascii: bool,
     pub no_progress: bool,
@@ -75,7 +74,6 @@ pub fn parse(
     let mut json_output = false;
     let mut by_email = false;
     let mut ignore_blank = false;
-    let mut ignore_whitespace = false;
     let mut committed_only = false;
     let mut ascii = false;
     let mut no_progress = false;
@@ -230,19 +228,6 @@ pub fn parse(
                     ));
                 }
             },
-            "ignore-whitespace" => match parse_bool_flag(inline.as_deref()) {
-                Ok(value) => ignore_whitespace = value,
-                Err(()) => {
-                    return Err(fail(
-                        out,
-                        default_workers,
-                        format!(
-                            "invalid boolean value {:?} for -ignore-whitespace: parse error",
-                            inline.as_deref().unwrap_or("")
-                        ),
-                    ));
-                }
-            },
             "ascii" => match parse_bool_flag(inline.as_deref()) {
                 Ok(value) => ascii = value,
                 Err(()) => {
@@ -310,7 +295,6 @@ pub fn parse(
         show_version: version_flag || v_flag,
         by_email,
         ignore_blank,
-        ignore_whitespace,
         committed_only,
         ascii,
         no_progress,
@@ -357,8 +341,6 @@ pub fn help_text(default_workers: usize) -> String {
          \x20   \tprint this help and exit\n\
          \x20 -ignore-blank\n\
          \x20   \tignore empty and whitespace-only lines\n\
-         \x20 -ignore-whitespace\n\
-         \x20   \tignore whitespace-only changes when attributing lines (like git blame -w)\n\
          \x20 -j int\n\
          \x20   \tnumber of concurrent git-blame workers (default {default_workers})\n\
          \x20 -json\n\
@@ -392,7 +374,6 @@ mod tests {
         assert!(!cfg.json_output);
         assert!(!cfg.by_email);
         assert!(!cfg.ignore_blank);
-        assert!(!cfg.ignore_whitespace);
         assert!(!cfg.committed_only);
         assert!(!cfg.ascii);
         assert!(!cfg.no_progress);
@@ -401,17 +382,11 @@ mod tests {
     }
 
     #[test]
-    fn output_and_whitespace_flags_parse() {
+    fn output_flags_parse() {
         let mut out = Vec::new();
-        let cfg = parse(
-            &args(&["-ascii", "-no-progress", "-ignore-whitespace"]),
-            4,
-            &mut out,
-        )
-        .unwrap();
+        let cfg = parse(&args(&["-ascii", "-no-progress"]), 4, &mut out).unwrap();
         assert!(cfg.ascii);
         assert!(cfg.no_progress);
-        assert!(cfg.ignore_whitespace);
 
         let cfg = parse(&args(&["-ascii=false"]), 4, &mut out).unwrap();
         assert!(!cfg.ascii);

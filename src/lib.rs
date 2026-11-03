@@ -1,5 +1,6 @@
 mod blame;
 mod config;
+mod diff_overlay;
 mod filter;
 mod git;
 mod output;
