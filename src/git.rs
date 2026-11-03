@@ -227,14 +227,11 @@ pub fn path_matches(git_path: &str, base: &str) -> bool {
 }
 
 pub fn display_path(git_path: &str, cwd_prefix: Option<&str>) -> String {
-    let Some(prefix) = cwd_prefix else {
+    let Some(prefix) = cwd_prefix.filter(|p| !p.is_empty()) else {
         return git_path.to_owned();
     };
-    if prefix.is_empty() {
-        return git_path.to_owned();
-    }
 
-    let cwd_parts: Vec<&str> = prefix.split('/').filter(|part| !part.is_empty()).collect();
+    let cwd_parts: Vec<&str> = prefix.split('/').filter(|p| !p.is_empty()).collect();
     let file_parts: Vec<&str> = git_path.split('/').collect();
     let common = cwd_parts
         .iter()
@@ -242,19 +239,29 @@ pub fn display_path(git_path: &str, cwd_prefix: Option<&str>) -> String {
         .take_while(|(left, right)| left == right)
         .count();
 
-    let mut parts = Vec::with_capacity(cwd_parts.len() - common + file_parts.len() - common);
-    for _ in common..cwd_parts.len() {
-        parts.push("..".to_owned());
-    }
-    for part in &file_parts[common..] {
-        parts.push((*part).to_owned());
+    let up = cwd_parts.len() - common;
+    let down = &file_parts[common..];
+
+    if up == 0 && down.is_empty() {
+        return ".".to_owned();
     }
 
-    if parts.is_empty() {
-        ".".to_owned()
-    } else {
-        parts.join("/")
+    // Pre-calculate capacity: each "../" is 3 chars, then remaining path segments.
+    let cap = up.saturating_mul(3) + git_path.len();
+    let mut out = String::with_capacity(cap);
+    for i in 0..up {
+        if i > 0 {
+            out.push('/');
+        }
+        out.push_str("..");
     }
+    for part in down {
+        if !out.is_empty() {
+            out.push('/');
+        }
+        out.push_str(part);
+    }
+    out
 }
 
 pub fn git_path_to_native(raw: &[u8]) -> PathBuf {
@@ -276,13 +283,16 @@ pub fn git_path_to_native(raw: &[u8]) -> PathBuf {
 }
 
 pub fn path_to_git_string(path: &Path) -> String {
-    path.components()
-        .filter_map(|component| match component {
-            Component::Normal(value) => Some(value.to_string_lossy().into_owned()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("/")
+    let mut out = String::new();
+    for component in path.components() {
+        if let Component::Normal(value) = component {
+            if !out.is_empty() {
+                out.push('/');
+            }
+            out.push_str(&value.to_string_lossy());
+        }
+    }
+    out
 }
 
 pub fn path_to_git_bytes(path: &Path) -> Vec<u8> {

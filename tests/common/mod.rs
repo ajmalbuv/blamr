@@ -74,7 +74,7 @@ impl TestRepo {
         let email_arg = format!("user.email={email}");
         let output = std::process::Command::new("git")
             .current_dir(self.path())
-            .args(&["-c", &name_arg, "-c", &email_arg, "commit", "-m", message])
+            .args(["-c", &name_arg, "-c", &email_arg, "commit", "-m", message])
             .output()
             .expect("failed to execute git commit");
         assert!(

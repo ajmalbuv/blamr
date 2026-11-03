@@ -4,6 +4,7 @@ use crate::git::{TrackedPath, open_repository, path_to_git_string};
 use crate::stats::Stats;
 use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
 use gix::bstr::ByteSlice;
+use std::borrow::Cow;
 use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::thread;
@@ -109,6 +110,12 @@ where
     Ok(Stats::from_counts(counts, succeeded))
 }
 
+/// Per-worker HEAD state, shared across all files processed by one thread.
+struct HeadState<'a> {
+    commit: Option<&'a gix::Commit<'a>>,
+    tree: Option<&'a gix::Tree<'a>>,
+}
+
 fn worker_loop(
     sync_repo: &gix::ThreadSafeRepository,
     config: &Config,
@@ -120,17 +127,24 @@ fn worker_loop(
     let normalize_crlf = should_normalize_crlf(&repo);
     let head_commit = repo.head_commit().ok();
     let head_tree = head_commit.as_ref().and_then(|c| c.tree().ok());
+    let head = HeadState {
+        commit: head_commit.as_ref(),
+        tree: head_tree.as_ref(),
+    };
     let mut author_cache: HashMap<gix::ObjectId, String> = HashMap::new();
 
     while let Ok(file) = jobs.recv() {
         let display_path = file.display_path.clone();
 
+        // SAFETY: author_cache is per-thread and not observed by any other thread.
+        // After a panic inside blame_worktree, author_cache may be partially updated,
+        // but it is never accessed outside this thread, so corrupted state cannot
+        // escape. The worker loop continues processing subsequent files normally.
         let result = catch_unwind(AssertUnwindSafe(|| {
             blame_worktree(
                 &repo,
                 &mailmap,
-                head_commit.as_ref(),
-                head_tree.as_ref(),
+                &head,
                 &mut author_cache,
                 config,
                 &file,
@@ -154,8 +168,7 @@ fn worker_loop(
 fn blame_worktree(
     repo: &gix::Repository,
     mailmap: &gix::mailmap::Snapshot,
-    head_commit: Option<&gix::Commit<'_>>,
-    head_tree: Option<&gix::Tree<'_>>,
+    head: &HeadState<'_>,
     author_cache: &mut HashMap<gix::ObjectId, String>,
     config: &Config,
     file: &TrackedPath,
@@ -169,15 +182,16 @@ fn blame_worktree(
         return Ok(HashMap::new());
     }
 
-    let contents = if normalize_crlf_enabled {
+    let contents: Cow<'_, [u8]> = if normalize_crlf_enabled {
         normalize_crlf(&raw_contents)
     } else {
-        raw_contents
+        Cow::Borrowed(&raw_contents)
     };
 
     let git_path_str = path_to_git_string(&file.relative_path);
-    let head_entry =
-        head_tree.and_then(|tree| tree.lookup_entry_by_path(&git_path_str).ok().flatten());
+    let head_entry = head
+        .tree
+        .and_then(|tree| tree.lookup_entry_by_path(&git_path_str).ok().flatten());
 
     let mut counts = HashMap::new();
 
@@ -195,7 +209,7 @@ fn blame_worktree(
         return Ok(counts);
     };
 
-    let head_commit = head_commit.unwrap();
+    let head_commit = head.commit.unwrap();
     let head_object = head_entry
         .object()
         .map_err(|error| format!("cannot read HEAD blob: {error}"))?;
@@ -257,7 +271,7 @@ fn blame_worktree(
     let lines = split_lines(&contents);
     let mapping = diff_overlay::map_worktree_to_head(head_bytes, &contents);
 
-    let head_line_count = split_lines(head_bytes).len();
+    let head_line_count = count_lines(head_bytes);
     let mut head_line_authors: Vec<Option<String>> = vec![None; head_line_count];
     for entry in &outcome.entries {
         let author = resolve_author(entry.commit_id, author_cache);
@@ -308,7 +322,11 @@ fn should_normalize_crlf(repo: &gix::Repository) -> bool {
         .unwrap_or(false)
 }
 
-fn normalize_crlf(contents: &[u8]) -> Vec<u8> {
+fn normalize_crlf(contents: &[u8]) -> Cow<'_, [u8]> {
+    // Fast path: if there are no CRLF sequences, return a zero-copy borrow.
+    if !contents.windows(2).any(|w| w == b"\r\n") {
+        return Cow::Borrowed(contents);
+    }
     let mut normalized = Vec::with_capacity(contents.len());
     let mut index = 0;
     while index < contents.len() {
@@ -320,7 +338,7 @@ fn normalize_crlf(contents: &[u8]) -> Vec<u8> {
             index += 1;
         }
     }
-    normalized
+    Cow::Owned(normalized)
 }
 
 fn uncommitted_author(config: &Config) -> &'static str {
@@ -332,11 +350,24 @@ fn uncommitted_author(config: &Config) -> &'static str {
 }
 
 fn split_lines(contents: &[u8]) -> Vec<&[u8]> {
+    if contents.is_empty() {
+        return Vec::new();
+    }
     let mut lines: Vec<&[u8]> = contents.split(|byte| *byte == b'\n').collect();
     if contents.ends_with(b"\n") {
         lines.pop();
     }
     lines
+}
+
+/// Count lines without allocating — used where only the count is needed.
+fn count_lines(bytes: &[u8]) -> usize {
+    if bytes.is_empty() {
+        return 0;
+    }
+    let n = bytes.iter().filter(|&&b| b == b'\n').count();
+    // A trailing newline does not add an extra logical line.
+    if bytes.ends_with(b"\n") { n } else { n + 1 }
 }
 
 fn is_blank(line: &[u8]) -> bool {
@@ -355,8 +386,13 @@ mod tests {
 
     #[test]
     fn normalizes_crlf_only() {
-        assert_eq!(normalize_crlf(b"a\r\nb\rc\n"), b"a\nb\rc\n");
-        assert_eq!(normalize_crlf(b"no newline"), b"no newline");
+        assert_eq!(&*normalize_crlf(b"a\r\nb\rc\n"), b"a\nb\rc\n");
+        assert_eq!(&*normalize_crlf(b"no newline"), b"no newline");
+        // Fast path: no CRLF → returns a borrowed slice (no allocation).
+        assert!(matches!(
+            normalize_crlf(b"no newline"),
+            std::borrow::Cow::Borrowed(_)
+        ));
     }
 
     #[test]
@@ -366,6 +402,26 @@ mod tests {
         assert!(!is_blank(b"x"));
         assert!(!is_blank(b" x "));
         assert!(is_blank("\u{00a0}".as_bytes()));
+    }
+
+    #[test]
+    fn count_lines_matches_split_lines_len() {
+        for sample in [
+            &b""[..],
+            &b"\n"[..],
+            &b"single line"[..],
+            &b"single line\n"[..],
+            &b"line 1\nline 2"[..],
+            &b"line 1\nline 2\n"[..],
+            &b"a\n\nb\n"[..],
+        ] {
+            assert_eq!(
+                count_lines(sample),
+                split_lines(sample).len(),
+                "failed for {:?}",
+                std::str::from_utf8(sample)
+            );
+        }
     }
 
     #[test]
