@@ -219,11 +219,13 @@ pub fn print_table(out: &mut dyn Write, stats: &Stats, options: TableOptions) ->
         .max()
         .unwrap_or(AUTHOR_MIN_WIDTH)
         .clamp(AUTHOR_MIN_WIDTH, AUTHOR_MAX_WIDTH);
-    let divider = options
-        .divider()
-        .to_string()
-        .repeat(author_width + 1 + LINES_WIDTH + 1 + PERCENT_WIDTH + 2);
+    let divider = std::iter::repeat_n(
+        options.divider(),
+        author_width + 1 + LINES_WIDTH + 1 + PERCENT_WIDTH + 2,
+    )
+    .collect::<String>();
 
+    // Buffer the entire table before writing to avoid partial output on broken pipes.
     let mut text = String::new();
     text.push_str(&divider);
     text.push('\n');

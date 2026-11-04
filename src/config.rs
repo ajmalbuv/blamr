@@ -1,3 +1,4 @@
+use lexopt::prelude::*;
 use std::ffi::OsString;
 use std::io::Write;
 
@@ -27,45 +28,8 @@ pub fn parse(
     out: &mut dyn Write,
 ) -> Result<Config, ParseError> {
     let default_workers = default_workers.max(1);
-
-    // Collect flags separately from positional arguments so flags may appear
-    // after paths. Values for -ext and -j that begin with '-' are not consumed.
-    let mut flag_args = Vec::new();
-    let mut pos_args = Vec::new();
-    let mut seen_separator = false;
-
-    let mut i = 0;
-    while i < args.len() {
-        let arg = &args[i];
-        let text = arg.to_string_lossy();
-
-        if text == "--" {
-            seen_separator = true;
-            pos_args.extend(args[i + 1..].iter().cloned());
-            break;
-        }
-
-        if text.starts_with('-') {
-            flag_args.push(arg.clone());
-            if (text == "-ext" || text == "-j")
-                && i + 1 < args.len()
-                && !args[i + 1].to_string_lossy().starts_with('-')
-            {
-                i += 1;
-                flag_args.push(args[i].clone());
-            }
-        } else {
-            pos_args.push(arg.clone());
-        }
-
-        i += 1;
-    }
-
-    let mut ordered = flag_args;
-    if seen_separator {
-        ordered.push(OsString::from("--"));
-    }
-    ordered.extend(pos_args);
+    let normalized = normalize_args(args);
+    let mut parser = lexopt::Parser::from_args(normalized);
 
     let mut extensions_raw: Option<String> = None;
     let mut workers_raw: Option<i64> = None;
@@ -79,63 +43,88 @@ pub fn parse(
     let mut no_progress = false;
     let mut paths = Vec::new();
 
-    let mut i = 0;
-    while i < ordered.len() {
-        let token = ordered[i].to_string_lossy().into_owned();
-
-        if token == "--" {
-            paths.extend(ordered[i + 1..].iter().cloned());
-            break;
-        }
-        if token == "-" {
-            paths.extend(ordered[i..].iter().cloned());
-            break;
-        }
-        if !token.starts_with('-') {
-            paths.extend(ordered[i..].iter().cloned());
-            break;
-        }
-
-        let stripped = if let Some(rest) = token.strip_prefix("--") {
-            rest
-        } else {
-            token.strip_prefix('-').unwrap_or(&token)
-        };
-        let (name, inline) = match stripped.split_once('=') {
-            Some((name, value)) => (name, Some(value.to_owned())),
-            None => (stripped, None),
-        };
-
-        match name {
-            "h" | "help" => {
+    while let Some(arg) = parser
+        .next()
+        .map_err(|e| fail(out, default_workers, e.to_string()))?
+    {
+        match arg {
+            Short('h') | Long("help") => {
                 return Err(ParseError::Help);
             }
-            "ext" => {
-                let value = match inline {
-                    Some(value) => value,
-                    None => {
-                        i += 1;
-                        if i >= ordered.len() {
-                            return Err(fail(out, default_workers, "flag needs an argument: -ext"));
-                        }
-                        ordered[i].to_string_lossy().into_owned()
-                    }
-                };
-                extensions_raw = Some(value);
+            Short('v') => {
+                v_flag = true;
             }
-            "j" => {
-                let value = match inline {
-                    Some(value) => value,
-                    None => {
-                        i += 1;
-                        if i >= ordered.len() {
-                            return Err(fail(out, default_workers, "flag needs an argument: -j"));
-                        }
-                        ordered[i].to_string_lossy().into_owned()
+            Long("v") => {
+                v_flag = parse_bool_opt(parser.optional_value(), "v", out, default_workers)?;
+            }
+            Long("version") => {
+                version_flag =
+                    parse_bool_opt(parser.optional_value(), "version", out, default_workers)?;
+            }
+            Long("json") => {
+                json_output =
+                    parse_bool_opt(parser.optional_value(), "json", out, default_workers)?;
+            }
+            Short('e') => {
+                by_email = true;
+            }
+            Long("email") => {
+                by_email = parse_bool_opt(parser.optional_value(), "email", out, default_workers)?;
+            }
+            Short('w') => {
+                ignore_blank = true;
+            }
+            Long("ignore-blank") => {
+                ignore_blank = parse_bool_opt(
+                    parser.optional_value(),
+                    "ignore-blank",
+                    out,
+                    default_workers,
+                )?;
+            }
+            Short('c') => {
+                committed_only = true;
+            }
+            Long("committed-only") => {
+                committed_only = parse_bool_opt(
+                    parser.optional_value(),
+                    "committed-only",
+                    out,
+                    default_workers,
+                )?;
+            }
+            Short('a') => {
+                ascii = true;
+            }
+            Long("ascii") => {
+                ascii = parse_bool_opt(parser.optional_value(), "ascii", out, default_workers)?;
+            }
+            Short('n') => {
+                no_progress = true;
+            }
+            Long("no-progress") => {
+                no_progress =
+                    parse_bool_opt(parser.optional_value(), "no-progress", out, default_workers)?;
+            }
+            Short('x') | Long("ext") | Long("extension") => {
+                let val = parser.value().map_err(|e| match e {
+                    lexopt::Error::MissingValue { .. } => {
+                        fail(out, default_workers, "flag needs an argument: -ext")
                     }
-                };
-                match value.parse::<i64>() {
-                    Ok(value) => workers_raw = Some(value),
+                    _ => fail(out, default_workers, e.to_string()),
+                })?;
+                extensions_raw = Some(val.to_string_lossy().into_owned());
+            }
+            Short('j') | Long("jobs") | Long("workers") | Long("j") => {
+                let val = parser.value().map_err(|e| match e {
+                    lexopt::Error::MissingValue { .. } => {
+                        fail(out, default_workers, "flag needs an argument: -j")
+                    }
+                    _ => fail(out, default_workers, e.to_string()),
+                })?;
+                let val_str = val.to_string_lossy();
+                match val_str.parse::<i64>() {
+                    Ok(v) => workers_raw = Some(v),
                     Err(error) => {
                         let reason = match error.kind() {
                             std::num::IntErrorKind::PosOverflow
@@ -145,116 +134,22 @@ pub fn parse(
                         return Err(fail(
                             out,
                             default_workers,
-                            format!("invalid value {value:?} for flag -j: {reason}"),
+                            format!("invalid value {val_str:?} for flag -j: {reason}"),
                         ));
                     }
                 }
             }
-            "version" => match parse_bool_flag(inline.as_deref()) {
-                Ok(value) => version_flag = value,
-                Err(()) => {
-                    return Err(fail(
-                        out,
-                        default_workers,
-                        format!(
-                            "invalid boolean value {:?} for -version: parse error",
-                            inline.as_deref().unwrap_or("")
-                        ),
-                    ));
-                }
-            },
-            "v" => match parse_bool_flag(inline.as_deref()) {
-                Ok(value) => v_flag = value,
-                Err(()) => {
-                    return Err(fail(
-                        out,
-                        default_workers,
-                        format!(
-                            "invalid boolean value {:?} for -v: parse error",
-                            inline.as_deref().unwrap_or("")
-                        ),
-                    ));
-                }
-            },
-            "json" => match parse_bool_flag(inline.as_deref()) {
-                Ok(value) => json_output = value,
-                Err(()) => {
-                    return Err(fail(
-                        out,
-                        default_workers,
-                        format!(
-                            "invalid boolean value {:?} for -json: parse error",
-                            inline.as_deref().unwrap_or("")
-                        ),
-                    ));
-                }
-            },
-            "email" => match parse_bool_flag(inline.as_deref()) {
-                Ok(value) => by_email = value,
-                Err(()) => {
-                    return Err(fail(
-                        out,
-                        default_workers,
-                        format!(
-                            "invalid boolean value {:?} for -email: parse error",
-                            inline.as_deref().unwrap_or("")
-                        ),
-                    ));
-                }
-            },
-            "ignore-blank" => match parse_bool_flag(inline.as_deref()) {
-                Ok(value) => ignore_blank = value,
-                Err(()) => {
-                    return Err(fail(
-                        out,
-                        default_workers,
-                        format!(
-                            "invalid boolean value {:?} for -ignore-blank: parse error",
-                            inline.as_deref().unwrap_or("")
-                        ),
-                    ));
-                }
-            },
-            "committed-only" => match parse_bool_flag(inline.as_deref()) {
-                Ok(value) => committed_only = value,
-                Err(()) => {
-                    return Err(fail(
-                        out,
-                        default_workers,
-                        format!(
-                            "invalid boolean value {:?} for -committed-only: parse error",
-                            inline.as_deref().unwrap_or("")
-                        ),
-                    ));
-                }
-            },
-            "ascii" => match parse_bool_flag(inline.as_deref()) {
-                Ok(value) => ascii = value,
-                Err(()) => {
-                    return Err(fail(
-                        out,
-                        default_workers,
-                        format!(
-                            "invalid boolean value {:?} for -ascii: parse error",
-                            inline.as_deref().unwrap_or("")
-                        ),
-                    ));
-                }
-            },
-            "no-progress" => match parse_bool_flag(inline.as_deref()) {
-                Ok(value) => no_progress = value,
-                Err(()) => {
-                    return Err(fail(
-                        out,
-                        default_workers,
-                        format!(
-                            "invalid boolean value {:?} for -no-progress: parse error",
-                            inline.as_deref().unwrap_or("")
-                        ),
-                    ));
-                }
-            },
-            _ => {
+            Value(val) => {
+                paths.push(val);
+            }
+            Short(c) => {
+                return Err(fail(
+                    out,
+                    default_workers,
+                    format!("flag provided but not defined: -{c}"),
+                ));
+            }
+            Long(name) => {
                 return Err(fail(
                     out,
                     default_workers,
@@ -262,8 +157,6 @@ pub fn parse(
                 ));
             }
         }
-
-        i += 1;
     }
 
     let workers = match workers_raw {
@@ -272,6 +165,7 @@ pub fn parse(
     };
 
     let mut extensions = Vec::new();
+    // if-let chain (edition 2024)
     if let Some(raw) = extensions_raw
         && !raw.trim().is_empty()
     {
@@ -302,22 +196,99 @@ pub fn parse(
     })
 }
 
+/// Normalizes raw command-line arguments so both GNU long options (`--flag`),
+/// GNU short options (`-h`, `-v`, `-j`, `-e`, `-w`, `-c`, `-a`, `-n`, `-x`),
+/// and legacy single-dash long options (`-json`, `-email`, etc.) parse cleanly.
+fn normalize_args(args: &[OsString]) -> Vec<OsString> {
+    const BOOL_SHORT_FLAGS: &[char] = &['h', 'v', 'e', 'w', 'c', 'a', 'n'];
+
+    let mut normalized = Vec::with_capacity(args.len());
+    let mut in_separator = false;
+
+    for arg in args {
+        if in_separator {
+            normalized.push(arg.clone());
+            continue;
+        }
+
+        let s = arg.to_string_lossy();
+        if s == "--" {
+            in_separator = true;
+            normalized.push(arg.clone());
+            continue;
+        }
+
+        if s == "-" || s.starts_with("--") || !s.starts_with('-') {
+            normalized.push(arg.clone());
+            continue;
+        }
+
+        // Starts with single '-' and has length >= 2
+        let stripped = &s[1..];
+        let (name, inline) = stripped.split_once('=').unwrap_or((stripped, ""));
+
+        // Short flag with inline = (e.g. -v=false, -ascii=false): convert to --v=false, --ascii=false
+        if !inline.is_empty() {
+            normalized.push(OsString::from(format!("-{s}")));
+            continue;
+        }
+
+        // Standalone single-character short flag (e.g. -h, -v, -j, -e, -w, -c, -a, -n, -x)
+        if name.len() == 1 {
+            normalized.push(arg.clone());
+            continue;
+        }
+
+        // Short flag with attached numeric or dot value (e.g. -j4, -x.rs)
+        if (s.starts_with("-j") && s.chars().nth(2).is_some_and(|c| c.is_ascii_digit()))
+            || s.starts_with("-x.")
+        {
+            normalized.push(arg.clone());
+            continue;
+        }
+
+        // Clustered short flags consisting entirely of bool flags (e.g. -ac, -ew, -acn)
+        if name.chars().all(|c| BOOL_SHORT_FLAGS.contains(&c)) {
+            normalized.push(arg.clone());
+            continue;
+        }
+
+        // Legacy single-dash long flag (e.g. -json, -email, -nope, etc.).
+        // Transform to double dash: -json -> --json
+        normalized.push(OsString::from(format!("-{s}")));
+    }
+
+    normalized
+}
+
+fn parse_bool_opt(
+    val: Option<OsString>,
+    flag: &str,
+    out: &mut dyn Write,
+    default_workers: usize,
+) -> Result<bool, ParseError> {
+    match val {
+        None => Ok(true),
+        Some(val) => {
+            let s = val.to_string_lossy();
+            match s.as_ref() {
+                "1" | "t" | "T" | "true" | "TRUE" | "True" => Ok(true),
+                "0" | "f" | "F" | "false" | "FALSE" | "False" => Ok(false),
+                _ => Err(fail(
+                    out,
+                    default_workers,
+                    format!("invalid boolean value {s:?} for -{flag}: parse error"),
+                )),
+            }
+        }
+    }
+}
+
 fn fail(out: &mut dyn Write, default_workers: usize, message: impl Into<String>) -> ParseError {
     let message = message.into();
     let _ = writeln!(out, "error: {message}");
     write_help(out, default_workers);
     ParseError::Message(message)
-}
-
-fn parse_bool_flag(value: Option<&str>) -> Result<bool, ()> {
-    match value {
-        None => Ok(true),
-        Some(value) => match value {
-            "1" | "t" | "T" | "true" | "TRUE" | "True" => Ok(true),
-            "0" | "f" | "F" | "false" | "FALSE" | "False" => Ok(false),
-            _ => Err(()),
-        },
-    }
 }
 
 pub fn help_text(default_workers: usize) -> String {
@@ -329,26 +300,25 @@ pub fn help_text(default_workers: usize) -> String {
          \x20 git blamr [flags] [paths...]\n\
          \n\
          Flags:\n\
-         \x20 -ascii\n\
+         \x20 -a, --ascii\n\
          \x20   \tuse ASCII table and progress output\n\
-         \x20 -committed-only\n\
+         \x20 -c, --committed-only\n\
          \x20   \texclude uncommitted working tree changes from attribution\n\
-         \x20 -email\n\
+         \x20 -e, --email\n\
          \x20   \taggregate lines by author email instead of name\n\
-         \x20 -ext string\n\
+         \x20 -x, --ext string\n\
          \x20   \tcomma-separated extensions to filter (e.g. .typ,.tex,.rs). Defaults to all text files.\n\
-         \x20 -h, -help\n\
+         \x20 -h, --help\n\
          \x20   \tprint this help and exit\n\
-         \x20 -ignore-blank\n\
+         \x20 -w, --ignore-blank\n\
          \x20   \tignore empty and whitespace-only lines\n\
-         \x20 -j int\n\
+         \x20 -j, --jobs int\n\
          \x20   \tnumber of concurrent git-blame workers (default {default_workers})\n\
-         \x20 -json\n\
+         \x20     --json\n\
          \x20   \toutput results as structured JSON\n\
-         \x20 -no-progress\n\
+         \x20 -n, --no-progress\n\
          \x20   \tdisable progress output\n\
-         \x20 -v\tprint version information and exit (shorthand)\n\
-         \x20 -version\n\
+         \x20 -v, --version\n\
          \x20   \tprint version information and exit\n"
     )
 }
@@ -390,12 +360,26 @@ mod tests {
 
         let cfg = parse(&args(&["-ascii=false"]), 4, &mut out).unwrap();
         assert!(!cfg.ascii);
+
+        // Also test GNU long flags with double dash
+        let cfg = parse(&args(&["--ascii", "--no-progress"]), 4, &mut out).unwrap();
+        assert!(cfg.ascii);
+        assert!(cfg.no_progress);
+
+        let cfg = parse(&args(&["--ascii=false"]), 4, &mut out).unwrap();
+        assert!(!cfg.ascii);
     }
 
     #[test]
     fn extensions_are_normalized() {
         let mut out = Vec::new();
         let cfg = parse(&args(&["-ext", "rs, .TS, typ , "]), 2, &mut out).unwrap();
+        assert_eq!(cfg.extensions, vec![".rs", ".ts", ".typ"]);
+
+        let cfg = parse(&args(&["--ext", "rs, .TS, typ , "]), 2, &mut out).unwrap();
+        assert_eq!(cfg.extensions, vec![".rs", ".ts", ".typ"]);
+
+        let cfg = parse(&args(&["-x", "rs, .TS, typ , "]), 2, &mut out).unwrap();
         assert_eq!(cfg.extensions, vec![".rs", ".ts", ".typ"]);
     }
 
@@ -404,6 +388,17 @@ mod tests {
         let mut out = Vec::new();
         let cfg = parse(
             &args(&["src/auth", "-json", "-ext", ".rs", "pkg/api"]),
+            4,
+            &mut out,
+        )
+        .unwrap();
+        assert!(cfg.json_output);
+        assert_eq!(cfg.extensions, vec![".rs"]);
+        assert_eq!(cfg.paths, args(&["src/auth", "pkg/api"]));
+
+        // With GNU double dash flags
+        let cfg = parse(
+            &args(&["src/auth", "--json", "--ext", ".rs", "pkg/api"]),
             4,
             &mut out,
         )
@@ -424,6 +419,9 @@ mod tests {
         .unwrap();
         assert_eq!(cfg.workers, 7);
         assert_eq!(cfg.extensions, vec![".ts"]);
+
+        let cfg = parse(&args(&["--jobs", "3", "--jobs", "8"]), 4, &mut out).unwrap();
+        assert_eq!(cfg.workers, 8);
     }
 
     #[test]
@@ -433,6 +431,9 @@ mod tests {
         assert_eq!(cfg.workers, 4);
         let cfg = parse(&args(&["-j", "-3"]), 0, &mut out).unwrap();
         assert_eq!(cfg.workers, 1);
+
+        let cfg = parse(&args(&["--jobs", "0"]), 4, &mut out).unwrap();
+        assert_eq!(cfg.workers, 4);
     }
 
     #[test]
@@ -441,6 +442,11 @@ mod tests {
         assert!(parse(&args(&["-v"]), 4, &mut out).unwrap().show_version);
         assert!(
             parse(&args(&["-version"]), 4, &mut out)
+                .unwrap()
+                .show_version
+        );
+        assert!(
+            parse(&args(&["--version"]), 4, &mut out)
                 .unwrap()
                 .show_version
         );
@@ -500,6 +506,11 @@ mod tests {
         let err = parse(&args(&["-h"]), 4, &mut out).unwrap_err();
         assert_eq!(err, ParseError::Help);
         assert!(out.is_empty());
+
+        let err = parse(&args(&["--help"]), 4, &mut out).unwrap_err();
+        assert_eq!(err, ParseError::Help);
+        assert!(out.is_empty());
+
         assert!(help_text(4).contains("Usage:"));
     }
 
@@ -509,6 +520,10 @@ mod tests {
         let cfg = parse(&args(&["--", "-json", "src"]), 4, &mut out).unwrap();
         assert!(!cfg.json_output);
         assert_eq!(cfg.paths, args(&["-json", "src"]));
+
+        let cfg = parse(&args(&["--", "--json", "src"]), 4, &mut out).unwrap();
+        assert!(!cfg.json_output);
+        assert_eq!(cfg.paths, args(&["--json", "src"]));
     }
 
     #[test]
@@ -517,5 +532,22 @@ mod tests {
         let cfg = parse(&args(&["-json", "false"]), 4, &mut out).unwrap();
         assert!(cfg.json_output);
         assert_eq!(cfg.paths, args(&["false"]));
+
+        let cfg = parse(&args(&["--json", "false"]), 4, &mut out).unwrap();
+        assert!(cfg.json_output);
+        assert_eq!(cfg.paths, args(&["false"]));
+    }
+
+    #[test]
+    fn gnu_short_flags_and_clustering() {
+        let mut out = Vec::new();
+        let cfg = parse(&args(&["-acn"]), 4, &mut out).unwrap();
+        assert!(cfg.ascii);
+        assert!(cfg.committed_only);
+        assert!(cfg.no_progress);
+
+        let cfg = parse(&args(&["-e", "-w"]), 4, &mut out).unwrap();
+        assert!(cfg.by_email);
+        assert!(cfg.ignore_blank);
     }
 }

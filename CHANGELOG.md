@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## 0.0.7 - Unreleased
 
+### Added
+
+- **GNU CLI flags (`--` long and `-` short options)**: Full support for standard GNU-style options across all flags:
+  - Long flags: `--help`, `--version`, `--json`, `--email`, `--ignore-blank`, `--committed-only`, `--ascii`, `--no-progress`, `--jobs`, `--ext`.
+  - Short flags: `-h` (help), `-v` (version), `-j` (jobs), `-e` (email), `-w` (ignore whitespace/blank lines), `-c` (committed only), `-a` (ASCII output), `-n` (no progress), `-x` (extension filter).
+  - Short option clustering (e.g. `-acn`, `-ew`) and attached value forms (`-j4`, `--jobs=4`, `-x.rs`, `--ext=.rs`).
+  - Seamless backward compatibility for legacy single-dash long flags (`-json`, `-email`, `-ascii`, `-ext`, etc.).
+
 ### Performance
 
 - **Zero-allocation line counting and clean-file bypass**: Bypassed `split_lines` entirely for clean files in HEAD when not filtering blank lines, and replaced `split_lines().len()` with a zero-allocation `count_lines` byte scanner.

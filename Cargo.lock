@@ -79,6 +79,7 @@ dependencies = [
  "crossbeam-channel",
  "gix",
  "gix-imara-diff",
+ "lexopt",
  "pretty_assertions",
  "rayon",
  "serde",
@@ -1476,6 +1477,12 @@ checksum = "875a5a69ac2bab1a891711cf5eccbec1ce0341ea805560dcd90b7a2e925132e8"
 dependencies = [
  "jiff-tzdb",
 ]
+
+[[package]]
+name = "lexopt"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "803ec87c9cfb29b9d2633f20cba1f488db3fd53f2158b1024cbefb47ba05d413"
 
 [[package]]
 name = "libc"

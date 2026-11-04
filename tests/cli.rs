@@ -515,3 +515,40 @@ fn symlink_entries_are_analyzed_as_links() {
     assert_eq!(value["total_files"], 1);
     assert_eq!(value["total_lines"], 1);
 }
+
+#[test]
+fn gnu_long_and_short_flags_work() {
+    let repo = TestRepo::new();
+    repo.commit_file(
+        "main.rs",
+        "fn main() {\n    println!(\"hello\");\n}\n",
+        "Alice",
+        "alice@example.com",
+        "init",
+    );
+
+    // Test GNU double-dash long flags
+    let value = json(&run(&repo, &["--json", "--jobs", "2"]));
+    assert_eq!(value["total_files"], 1);
+    assert_eq!(value["total_lines"], 3);
+    assert_eq!(value["authors"][0]["author"], "Alice");
+
+    // Test GNU short flags and clustering
+    let value = json(&run(&repo, &["--json", "-e"]));
+    assert_eq!(value["authors"][0]["author"], "alice@example.com");
+
+    // Test clustered short flags: -a (ascii) with --json
+    let output = run(&repo, &["-a"]);
+    assert_success(&output);
+    assert!(stdout(&output).is_ascii());
+
+    // Test GNU help and version flags
+    let output = run(&repo, &["--help"]);
+    assert_success(&output);
+    assert!(stdout(&output).contains("Usage:"));
+    assert!(stdout(&output).contains("-a, --ascii"));
+
+    let output = run(&repo, &["--version"]);
+    assert_success(&output);
+    assert!(stdout(&output).starts_with("blamr version "));
+}

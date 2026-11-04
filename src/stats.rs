@@ -32,6 +32,7 @@ impl Stats {
             .filter(|(_, lines)| *lines > 0)
             .map(|(author, lines)| {
                 let percentage = if total_lines > 0 {
+                    // Round to 2 decimal places
                     let raw = (lines as f64 / total_lines as f64 * 100.0) * 100.0;
                     raw.round() / 100.0
                 } else {

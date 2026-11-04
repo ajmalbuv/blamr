@@ -12,9 +12,7 @@ use error::RunError;
 use std::io::{self, IsTerminal, Write};
 
 pub fn run() -> i32 {
-    let default_workers = std::thread::available_parallelism()
-        .map(|count| count.get())
-        .unwrap_or(1);
+    let default_workers = std::thread::available_parallelism().map_or(1, |count| count.get());
 
     let args: Vec<_> = std::env::args_os().skip(1).collect();
     let mut stderr = io::stderr().lock();

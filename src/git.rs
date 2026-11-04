@@ -72,6 +72,7 @@ pub fn collect_tracked(config: &Config) -> Result<(Vec<TrackedPath>, gix::Reposi
             continue;
         }
 
+        // Non-UTF-8 paths are converted lossily for display and matching purposes.
         let git_path = String::from_utf8_lossy(path_bytes).into_owned();
         if !explicit.is_empty() && !explicit.iter().any(|base| path_matches(&git_path, base)) {
             continue;
