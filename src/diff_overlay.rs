@@ -25,7 +25,12 @@ pub fn map_worktree_to_head(head_bytes: &[u8], worktree_bytes: &[u8]) -> LineMap
         // Unchanged lines between previous change and this change
         let unchanged_len = after_start.saturating_sub(prev_after);
         for i in 0..unchanged_len {
-            worktree_to_head.push(Some(prev_before + i));
+            let before_idx = prev_before + i;
+            if before_idx < before_len {
+                worktree_to_head.push(Some(before_idx));
+            } else {
+                worktree_to_head.push(None);
+            }
         }
 
         // Mark lines added or modified in the worktree as None (uncommitted)
