@@ -2,10 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
-## 0.0.7 - Unreleased
+## 0.0.7 - 2026-11-04
 
 ### Added
 
+- **Thousands separator formatting for line counts**: Line counts in terminal tables are now formatted with commas (e.g. `1,234` or `1,250,000`), with dynamic column auto-scaling for repositories with millions of lines. Machine-readable JSON output preserves standard numeric types.
 - **GNU CLI flags (`--` long and `-` short options)**: Full support for standard GNU-style options across all flags:
   - Long flags: `--help`, `--version`, `--json`, `--email`, `--ignore-blank`, `--committed-only`, `--ascii`, `--no-progress`, `--jobs`, `--ext`.
   - Short flags: `-h` (help), `-v` (version), `-j` (jobs), `-e` (email), `-w` (ignore whitespace/blank lines), `-c` (committed only), `-a` (ASCII output), `-n` (no progress), `-x` (extension filter).

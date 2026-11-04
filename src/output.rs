@@ -219,9 +219,10 @@ pub fn print_table(out: &mut dyn Write, stats: &Stats, options: TableOptions) ->
         .max()
         .unwrap_or(AUTHOR_MIN_WIDTH)
         .clamp(AUTHOR_MIN_WIDTH, AUTHOR_MAX_WIDTH);
+    let lines_width = format_thousands(stats.total_lines).len().max(LINES_WIDTH);
     let divider = std::iter::repeat_n(
         options.divider(),
-        author_width + 1 + LINES_WIDTH + 1 + PERCENT_WIDTH + 2,
+        author_width + 1 + lines_width + 1 + PERCENT_WIDTH + 2,
     )
     .collect::<String>();
 
@@ -231,7 +232,7 @@ pub fn print_table(out: &mut dyn Write, stats: &Stats, options: TableOptions) ->
     text.push('\n');
     text.push_str(&pad_right(author_header, author_width));
     text.push(' ');
-    text.push_str(&pad_left("Lines", LINES_WIDTH));
+    text.push_str(&pad_left("Lines", lines_width));
     text.push(' ');
     text.push_str(&pad_left("%", PERCENT_WIDTH));
     text.push('\n');
@@ -245,7 +246,7 @@ pub fn print_table(out: &mut dyn Write, stats: &Stats, options: TableOptions) ->
 
         text.push_str(&pad_right(&name, author_width));
         text.push(' ');
-        text.push_str(&pad_left(&author.lines.to_string(), LINES_WIDTH));
+        text.push_str(&pad_left(&format_thousands(author.lines), lines_width));
         text.push(' ');
         text.push_str(&pad_left(
             &format!("{:.1}%", author.percentage),
@@ -260,7 +261,7 @@ pub fn print_table(out: &mut dyn Write, stats: &Stats, options: TableOptions) ->
     text.push('\n');
     text.push_str(&pad_right("Total", author_width));
     text.push(' ');
-    text.push_str(&pad_left(&stats.total_lines.to_string(), LINES_WIDTH));
+    text.push_str(&pad_left(&format_thousands(stats.total_lines), lines_width));
     text.push('\n');
 
     out.write_all(text.as_bytes())
@@ -304,6 +305,31 @@ fn pad_left(value: &str, width: usize) -> String {
     } else {
         format!("{}{value}", " ".repeat(width - length))
     }
+}
+
+pub fn format_thousands(mut n: u64) -> String {
+    if n < 1000 {
+        return n.to_string();
+    }
+
+    let mut buf = [0u8; 32];
+    let mut i = buf.len();
+
+    let mut count = 0;
+    while n > 0 {
+        if count == 3 {
+            i -= 1;
+            buf[i] = b',';
+            count = 0;
+        }
+        i -= 1;
+        buf[i] = b'0' + (n % 10) as u8;
+        n /= 10;
+        count += 1;
+    }
+
+    // SAFETY: buf contains only ASCII digits and commas.
+    std::str::from_utf8(&buf[i..]).unwrap().to_owned()
 }
 
 #[cfg(test)]
@@ -509,5 +535,54 @@ mod tests {
         progress.update(&mut buffer, 1, 2, "test.txt").unwrap();
         assert!(progress.finish(&mut buffer).is_ok());
         assert!(progress.finish(&mut buffer).is_ok());
+    }
+
+    #[test]
+    fn format_thousands_commas() {
+        assert_eq!(format_thousands(0), "0");
+        assert_eq!(format_thousands(9), "9");
+        assert_eq!(format_thousands(999), "999");
+        assert_eq!(format_thousands(1000), "1,000");
+        assert_eq!(format_thousands(1234), "1,234");
+        assert_eq!(format_thousands(12345), "12,345");
+        assert_eq!(format_thousands(123456), "123,456");
+        assert_eq!(format_thousands(1234567), "1,234,567");
+        assert_eq!(format_thousands(123456789), "123,456,789");
+        assert_eq!(format_thousands(u64::MAX), "18,446,744,073,709,551,615");
+    }
+
+    #[test]
+    fn table_formats_commas_on_large_line_counts() {
+        let stats = Stats {
+            total_files: 5,
+            total_lines: 1_250_000,
+            authors: vec![
+                AuthorStat {
+                    author: "Alice".to_owned(),
+                    lines: 1_000_000,
+                    percentage: 80.0,
+                },
+                AuthorStat {
+                    author: "Bob".to_owned(),
+                    lines: 250_000,
+                    percentage: 20.0,
+                },
+            ],
+        };
+
+        let mut buffer = Vec::new();
+        print_table(
+            &mut buffer,
+            &stats,
+            TableOptions {
+                ascii: false,
+                by_email: false,
+            },
+        )
+        .unwrap();
+        let output = String::from_utf8(buffer).unwrap();
+        assert!(output.contains("1,000,000"));
+        assert!(output.contains("250,000"));
+        assert!(output.contains("1,250,000"));
     }
 }
