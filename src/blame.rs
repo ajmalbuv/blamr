@@ -7,6 +7,7 @@ use gix::bstr::ByteSlice;
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::Arc;
 use std::thread;
 
 pub enum BlameEvent<'a> {
@@ -23,7 +24,7 @@ pub enum BlameEvent<'a> {
 
 struct Event {
     display_path: String,
-    result: Result<HashMap<String, u64>, String>,
+    result: Result<HashMap<Arc<str>, u64>, String>,
 }
 
 pub fn blame_files<F>(
@@ -74,7 +75,7 @@ where
         .map_err(|error| format!("cannot start feeder thread: {error}"))?;
     drop(job_rx);
 
-    let mut counts: HashMap<String, u64> = HashMap::new();
+    let mut counts: HashMap<Arc<str>, u64> = HashMap::new();
     let mut succeeded: u64 = 0;
 
     for (done, event) in event_rx.into_iter().enumerate() {
@@ -108,7 +109,12 @@ where
         }
     }
 
-    Ok(Stats::from_counts(counts, succeeded))
+    let string_counts: HashMap<String, u64> = counts
+        .into_iter()
+        .map(|(author, count)| (author.to_string(), count))
+        .collect();
+
+    Ok(Stats::from_counts(string_counts, succeeded))
 }
 
 /// Per-worker HEAD state, shared across all files processed by one thread.
@@ -132,7 +138,7 @@ fn worker_loop(
         commit: head_commit.as_ref(),
         tree: head_tree.as_ref(),
     };
-    let mut author_cache: HashMap<gix::ObjectId, String> = HashMap::new();
+    let mut author_cache: HashMap<gix::ObjectId, Arc<str>> = HashMap::new();
 
     while let Ok(file) = jobs.recv() {
         let display_path = file.display_path.clone();
@@ -170,11 +176,11 @@ fn blame_worktree(
     repo: &gix::Repository,
     mailmap: &gix::mailmap::Snapshot,
     head: &HeadState<'_>,
-    author_cache: &mut HashMap<gix::ObjectId, String>,
+    author_cache: &mut HashMap<gix::ObjectId, Arc<str>>,
     config: &Config,
     file: &TrackedPath,
     normalize_crlf_enabled: bool,
-) -> Result<HashMap<String, u64>, String> {
+) -> Result<HashMap<Arc<str>, u64>, String> {
     let raw_contents = file
         .read_worktree()
         .map_err(|error| format!("cannot read worktree file: {error}"))?;
@@ -198,13 +204,14 @@ fn blame_worktree(
 
     let Some(head_entry) = head_entry else {
         if !config.committed_only {
-            let lines = split_lines(&contents);
-            let count = lines
-                .iter()
-                .filter(|line| !config.ignore_blank || !is_blank(line))
-                .count() as u64;
+            let count = if config.ignore_blank {
+                let lines = split_lines(&contents);
+                lines.iter().filter(|line| !is_blank(line)).count() as u64
+            } else {
+                count_lines(&contents) as u64
+            };
             if count > 0 {
-                counts.insert(uncommitted_author(config).to_owned(), count);
+                counts.insert(uncommitted_author_arc(config), count);
             }
         }
         return Ok(counts);
@@ -225,45 +232,59 @@ fn blame_worktree(
         )
         .map_err(|error| format!("git blame failed: {error}"))?;
 
-    let resolve_author =
-        |commit_id: gix::ObjectId, author_cache: &mut HashMap<gix::ObjectId, String>| -> String {
-            if let Some(author) = author_cache.get(&commit_id) {
-                return author.clone();
-            }
-            let author = match repo.find_object(commit_id) {
-                Ok(obj) => {
-                    let commit = obj.into_commit();
-                    let sig = commit.author().unwrap_or_default();
-                    let resolved = mailmap.resolve(sig);
-                    if config.by_email {
-                        String::from_utf8_lossy(resolved.email.trim()).to_lowercase()
-                    } else {
-                        String::from_utf8_lossy(resolved.name.trim()).into_owned()
-                    }
+    let resolve_author = |commit_id: gix::ObjectId,
+                          author_cache: &mut HashMap<gix::ObjectId, Arc<str>>|
+     -> Arc<str> {
+        if let Some(author) = author_cache.get(&commit_id) {
+            return Arc::clone(author);
+        }
+        let author: Arc<str> = match repo.find_object(commit_id) {
+            Ok(obj) => {
+                let commit = obj.into_commit();
+                let sig = commit.author().unwrap_or_default();
+                let resolved = mailmap.resolve(sig);
+                if config.by_email {
+                    let email = String::from_utf8_lossy(resolved.email.trim()).to_lowercase();
+                    Arc::from(email)
+                } else {
+                    let name = String::from_utf8_lossy(resolved.name.trim());
+                    Arc::from(name.as_ref())
                 }
-                Err(_) => uncommitted_author(config).to_owned(),
-            };
-            let author = if author.is_empty() {
-                uncommitted_author(config).to_owned()
-            } else {
-                author
-            };
-            author_cache.insert(commit_id, author.clone());
+            }
+            Err(_) => uncommitted_author_arc(config),
+        };
+        let author = if author.is_empty() {
+            uncommitted_author_arc(config)
+        } else {
             author
         };
+        author_cache.insert(commit_id, Arc::clone(&author));
+        author
+    };
 
     if contents == head_bytes {
+        if !config.ignore_blank {
+            for entry in &outcome.entries {
+                let author = resolve_author(entry.commit_id, author_cache);
+                *counts.entry(author).or_default() += entry.len.get() as u64;
+            }
+            return Ok(counts);
+        }
+
         let lines = split_lines(&contents);
         for entry in &outcome.entries {
             let author = resolve_author(entry.commit_id, author_cache);
             let start = entry.start_in_blamed_file as usize;
+            let mut non_blank = 0u64;
             for offset in 0..(entry.len.get() as usize) {
-                if let Some(line) = lines.get(start + offset) {
-                    if config.ignore_blank && is_blank(line) {
-                        continue;
-                    }
-                    *counts.entry(author.clone()).or_default() += 1;
+                if let Some(line) = lines.get(start + offset)
+                    && !is_blank(line)
+                {
+                    non_blank += 1;
                 }
+            }
+            if non_blank > 0 {
+                *counts.entry(author).or_default() += non_blank;
             }
         }
         return Ok(counts);
@@ -273,16 +294,32 @@ fn blame_worktree(
     let mapping = diff_overlay::map_worktree_to_head(head_bytes, &contents);
 
     let head_line_count = count_lines(head_bytes);
-    let mut head_line_authors: Vec<Option<String>> = vec![None; head_line_count];
+    let mut author_table: Vec<Arc<str>> = Vec::new();
+    let mut head_line_authors: Vec<Option<u32>> = vec![None; head_line_count];
+
     for entry in &outcome.entries {
         let author = resolve_author(entry.commit_id, author_cache);
+        let author_idx = match author_table
+            .iter()
+            .position(|a| Arc::ptr_eq(a, &author) || *a == author)
+        {
+            Some(idx) => idx as u32,
+            None => {
+                let idx = author_table.len() as u32;
+                author_table.push(author);
+                idx
+            }
+        };
         let start = entry.start_in_blamed_file as usize;
         for offset in 0..(entry.len.get() as usize) {
             if let Some(slot) = head_line_authors.get_mut(start + offset) {
-                *slot = Some(author.clone());
+                *slot = Some(author_idx);
             }
         }
     }
+
+    let mut line_counts = vec![0u64; author_table.len()];
+    let mut uncommitted_count = 0u64;
 
     for (line_idx, line) in lines.iter().enumerate() {
         if config.ignore_blank && is_blank(line) {
@@ -292,21 +329,35 @@ fn blame_worktree(
         let head_line = mapping.worktree_to_head.get(line_idx).copied().flatten();
         match head_line {
             Some(head_idx) => {
-                let author = head_line_authors
-                    .get(head_idx)
-                    .and_then(Option::as_ref)
-                    .cloned()
-                    .unwrap_or_else(|| uncommitted_author(config).to_owned());
-                *counts.entry(author).or_default() += 1;
+                let author_idx = head_line_authors.get(head_idx).copied().flatten();
+                match author_idx {
+                    Some(idx) => {
+                        if let Some(c) = line_counts.get_mut(idx as usize) {
+                            *c += 1;
+                        }
+                    }
+                    None => {
+                        uncommitted_count += 1;
+                    }
+                }
             }
             None => {
                 if !config.committed_only {
-                    *counts
-                        .entry(uncommitted_author(config).to_owned())
-                        .or_default() += 1;
+                    uncommitted_count += 1;
                 }
             }
         }
+    }
+
+    for (author_idx, count) in line_counts.into_iter().enumerate() {
+        if count > 0 {
+            *counts
+                .entry(Arc::clone(&author_table[author_idx]))
+                .or_default() += count;
+        }
+    }
+    if uncommitted_count > 0 {
+        *counts.entry(uncommitted_author_arc(config)).or_default() += uncommitted_count;
     }
 
     Ok(counts)
@@ -342,11 +393,15 @@ fn normalize_crlf(contents: &[u8]) -> Cow<'_, [u8]> {
     Cow::Owned(normalized)
 }
 
-fn uncommitted_author(config: &Config) -> &'static str {
+fn uncommitted_author_arc(config: &Config) -> Arc<str> {
+    static NOT_COMMITTED_NAME: std::sync::LazyLock<Arc<str>> =
+        std::sync::LazyLock::new(|| Arc::from("Not Committed Yet"));
+    static NOT_COMMITTED_EMAIL: std::sync::LazyLock<Arc<str>> =
+        std::sync::LazyLock::new(|| Arc::from("not.committed.yet"));
     if config.by_email {
-        "not.committed.yet"
+        Arc::clone(&NOT_COMMITTED_EMAIL)
     } else {
-        "Not Committed Yet"
+        Arc::clone(&NOT_COMMITTED_NAME)
     }
 }
 
