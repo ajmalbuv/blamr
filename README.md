@@ -5,6 +5,7 @@
 [![crates.io](https://img.shields.io/crates/v/blamr.svg)](https://crates.io/crates/blamr)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 ![Build Status](https://github.com/ajmalbuv/blamr/actions/workflows/ci.yml/badge.svg)
+[![codecov](https://codecov.io/gh/ajmalbuv/blamr/graph/badge.svg)](https://codecov.io/gh/ajmalbuv/blamr)
 
 `blamr` is a local-only Git authorship and line-statistics tool. It is written in pure Rust
 using [Gitoxide (`gix`)](https://github.com/GitoxideLabs/gitoxide), so the released binaries
