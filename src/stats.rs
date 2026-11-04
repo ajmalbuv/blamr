@@ -29,6 +29,7 @@ impl Stats {
 
         let mut authors: Vec<AuthorStat> = counts
             .into_iter()
+            .filter(|(_, lines)| *lines > 0)
             .map(|(author, lines)| {
                 let percentage = if total_lines > 0 {
                     let raw = (lines as f64 / total_lines as f64 * 100.0) * 100.0;
@@ -73,12 +74,11 @@ mod tests {
         let stats = Stats::from_counts(counts, 3);
         assert_eq!(stats.total_files, 3);
         assert_eq!(stats.total_lines, 100);
+        assert_eq!(stats.authors.len(), 2);
         assert_eq!(stats.authors[0].author, "Alice");
         assert_eq!(stats.authors[0].percentage, 70.0);
         assert_eq!(stats.authors[1].author, "Bob");
         assert_eq!(stats.authors[1].percentage, 30.0);
-        assert_eq!(stats.authors[2].author, "Carol");
-        assert_eq!(stats.authors[2].percentage, 0.0);
     }
 
     #[test]
@@ -93,7 +93,9 @@ mod tests {
 
     #[test]
     fn zero_lines() {
-        let stats = Stats::from_counts(HashMap::new(), 2);
+        let mut counts = HashMap::new();
+        counts.insert("Carol".to_owned(), 0);
+        let stats = Stats::from_counts(counts, 2);
         assert_eq!(stats.total_files, 2);
         assert_eq!(stats.total_lines, 0);
         assert!(stats.authors.is_empty());

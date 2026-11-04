@@ -33,7 +33,7 @@ pub fn open_repository() -> Result<gix::Repository, String> {
         .map_err(|error| format!("not a git repo (or repository discovery failed): {error}"))
 }
 
-pub fn collect_tracked(config: &Config) -> Result<Vec<TrackedPath>, String> {
+pub fn collect_tracked(config: &Config) -> Result<(Vec<TrackedPath>, gix::Repository), String> {
     let repo = open_repository()?;
     let workdir = repo
         .workdir()
@@ -124,7 +124,7 @@ pub fn collect_tracked(config: &Config) -> Result<Vec<TrackedPath>, String> {
         })
         .collect();
 
-    Ok(tracked)
+    Ok((tracked, repo))
 }
 
 fn explicit_paths(paths: &[OsString], cwd: &Path, workdir: &Path) -> Result<Vec<String>, String> {

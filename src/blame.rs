@@ -1,8 +1,8 @@
 use crate::config::Config;
 use crate::diff_overlay;
-use crate::git::{TrackedPath, open_repository, path_to_git_string};
+use crate::git::{TrackedPath, path_to_git_string};
 use crate::stats::Stats;
-use crossbeam_channel::{Receiver, Sender, bounded, unbounded};
+use crossbeam_channel::{Receiver, Sender, bounded};
 use gix::bstr::ByteSlice;
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -28,6 +28,7 @@ struct Event {
 
 pub fn blame_files<F>(
     config: &Config,
+    repo: gix::Repository,
     files: Vec<TrackedPath>,
     mut on_event: F,
 ) -> Result<Stats, String>
@@ -39,13 +40,13 @@ where
         return Ok(Stats::empty());
     }
 
-    let repo = open_repository()?;
     let sync_repo = repo.into_sync();
 
     let workers = config.workers.max(1).min(total);
     let job_capacity = workers.saturating_mul(2).max(1);
+    let event_capacity = workers.saturating_mul(4).max(job_capacity);
     let (job_tx, job_rx) = bounded::<TrackedPath>(job_capacity);
-    let (event_tx, event_rx) = unbounded::<Event>();
+    let (event_tx, event_rx) = bounded::<Event>(event_capacity);
 
     let mut handles = Vec::with_capacity(workers);
     for index in 0..workers {

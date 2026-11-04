@@ -32,7 +32,7 @@ pub fn run() -> i32 {
         return print_line(&format!("blamr version {}", output::version_string()));
     }
 
-    let files = match git::collect_tracked(&config) {
+    let (files, repo) = match git::collect_tracked(&config) {
         Ok(files) => files,
         Err(error) => {
             eprintln!("error: {error}");
@@ -47,7 +47,7 @@ pub fn run() -> i32 {
     let mut progress = output::Progress::new(progress_enabled, output::terminal_width());
     let mut stderr = io::stderr().lock();
 
-    let result = blame::blame_files(&config, files, |event| match event {
+    let result = blame::blame_files(&config, repo, files, |event| match event {
         blame::BlameEvent::Progress { done, total, path } => {
             let _ = progress.update(&mut stderr, done, total, path);
         }
