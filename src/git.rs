@@ -1,4 +1,5 @@
 use crate::config::Config;
+use crate::error::GitError;
 use crate::filter;
 use rayon::prelude::*;
 use std::collections::HashSet;
@@ -27,19 +28,15 @@ impl TrackedPath {
     }
 }
 
-pub fn open_repository() -> Result<gix::Repository, String> {
-    let cwd = std::env::current_dir().map_err(|error| format!("cannot determine CWD: {error}"))?;
-    gix::discover_with_environment_overrides(&cwd)
-        .map_err(|error| format!("not a git repo (or repository discovery failed): {error}"))
+pub fn open_repository() -> Result<gix::Repository, GitError> {
+    let cwd = std::env::current_dir().map_err(GitError::Cwd)?;
+    gix::discover_with_environment_overrides(&cwd).map_err(GitError::Discovery)
 }
 
-pub fn collect_tracked(config: &Config) -> Result<(Vec<TrackedPath>, gix::Repository), String> {
+pub fn collect_tracked(config: &Config) -> Result<(Vec<TrackedPath>, gix::Repository), GitError> {
     let repo = open_repository()?;
-    let workdir = repo
-        .workdir()
-        .ok_or_else(|| "not a git repo (or repository has no worktree)".to_owned())?
-        .to_path_buf();
-    let cwd = std::env::current_dir().map_err(|error| format!("cannot determine CWD: {error}"))?;
+    let workdir = repo.workdir().ok_or(GitError::NoWorktree)?.to_path_buf();
+    let cwd = std::env::current_dir().map_err(GitError::Cwd)?;
 
     let workdir = canonicalize_or(workdir);
     let cwd = canonicalize_or(cwd);
@@ -53,10 +50,9 @@ pub fn collect_tracked(config: &Config) -> Result<(Vec<TrackedPath>, gix::Reposi
             false,
             Default::default(),
         )
-        .map_err(|error| format!("cannot open repository index: {error}"))?
+        .map_err(GitError::IndexOpen)?
     } else {
-        repo.open_index()
-            .map_err(|error| format!("cannot open repository index: {error}"))?
+        repo.open_index().map_err(GitError::IndexOpen)?
     };
 
     struct Candidate {
@@ -127,7 +123,7 @@ pub fn collect_tracked(config: &Config) -> Result<(Vec<TrackedPath>, gix::Reposi
     Ok((tracked, repo))
 }
 
-fn explicit_paths(paths: &[OsString], cwd: &Path, workdir: &Path) -> Result<Vec<String>, String> {
+fn explicit_paths(paths: &[OsString], cwd: &Path, workdir: &Path) -> Result<Vec<String>, GitError> {
     let mut bases = Vec::with_capacity(paths.len());
 
     for value in paths {
@@ -140,9 +136,8 @@ fn explicit_paths(paths: &[OsString], cwd: &Path, workdir: &Path) -> Result<Vec<
         let absolute = canonicalize_explicit(absolute);
         let absolute = normalize_path(&absolute);
         let Some(relative) = relative_to_workdir(&absolute, workdir) else {
-            return Err(format!(
-                "path is outside repository: {}",
-                path.to_string_lossy()
+            return Err(GitError::PathOutsideRepo(
+                path.to_string_lossy().into_owned(),
             ));
         };
         bases.push(path_to_git_string(&relative));

@@ -17,6 +17,7 @@ unicode-width = "0.2"
 rayon = "1.10"
 gix-imara-diff = "0.3"
 gix = { version = "0.90" }
+thiserror = "2"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_System_Console"] }

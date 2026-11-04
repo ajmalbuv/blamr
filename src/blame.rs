@@ -1,5 +1,6 @@
 use crate::config::Config;
 use crate::diff_overlay;
+use crate::error::{BlameError, BlameFileError};
 use crate::git::{TrackedPath, path_to_git_string};
 use crate::stats::Stats;
 use crossbeam_channel::{Receiver, Sender, bounded};
@@ -18,13 +19,13 @@ pub enum BlameEvent<'a> {
     },
     Warning {
         path: &'a str,
-        message: &'a str,
+        error: &'a BlameFileError,
     },
 }
 
 struct Event {
     display_path: String,
-    result: Result<HashMap<Arc<str>, u64>, String>,
+    result: Result<HashMap<Arc<str>, u64>, BlameFileError>,
 }
 
 pub fn blame_files<F>(
@@ -32,7 +33,7 @@ pub fn blame_files<F>(
     repo: gix::Repository,
     files: Vec<TrackedPath>,
     mut on_event: F,
-) -> Result<Stats, String>
+) -> Result<Stats, BlameError>
 where
     F: FnMut(BlameEvent<'_>),
 {
@@ -58,7 +59,7 @@ where
         let handle = thread::Builder::new()
             .name(format!("blamr-worker-{index}"))
             .spawn(move || worker_loop(&sync_repo, &config, &jobs, &events))
-            .map_err(|error| format!("cannot start worker thread: {error}"))?;
+            .map_err(BlameError::WorkerSpawn)?;
         handles.push(handle);
     }
     drop(event_tx);
@@ -72,7 +73,7 @@ where
                 }
             }
         })
-        .map_err(|error| format!("cannot start feeder thread: {error}"))?;
+        .map_err(BlameError::FeederSpawn)?;
     drop(job_rx);
 
     let mut counts: HashMap<Arc<str>, u64> = HashMap::new();
@@ -86,17 +87,17 @@ where
             path: &event.display_path,
         });
 
-        match event.result {
+        match &event.result {
             Ok(file_counts) => {
                 succeeded += 1;
                 for (author, lines) in file_counts {
-                    *counts.entry(author).or_default() += lines;
+                    *counts.entry(Arc::clone(author)).or_default() += lines;
                 }
             }
             Err(error) => {
                 on_event(BlameEvent::Warning {
                     path: &event.display_path,
-                    message: &error,
+                    error,
                 });
             }
         }
@@ -158,7 +159,7 @@ fn worker_loop(
                 normalize_crlf,
             )
         }))
-        .unwrap_or_else(|_| Err("internal worker panic".to_owned()));
+        .unwrap_or(Err(BlameFileError::WorkerPanic));
 
         if events
             .send(Event {
@@ -180,10 +181,8 @@ fn blame_worktree(
     config: &Config,
     file: &TrackedPath,
     normalize_crlf_enabled: bool,
-) -> Result<HashMap<Arc<str>, u64>, String> {
-    let raw_contents = file
-        .read_worktree()
-        .map_err(|error| format!("cannot read worktree file: {error}"))?;
+) -> Result<HashMap<Arc<str>, u64>, BlameFileError> {
+    let raw_contents = file.read_worktree().map_err(BlameFileError::WorktreeRead)?;
 
     if raw_contents.is_empty() {
         return Ok(HashMap::new());
@@ -218,9 +217,7 @@ fn blame_worktree(
     };
 
     let head_commit = head.commit.unwrap();
-    let head_object = head_entry
-        .object()
-        .map_err(|error| format!("cannot read HEAD blob: {error}"))?;
+    let head_object = head_entry.object().map_err(BlameFileError::HeadBlob)?;
     let head_blob = head_object.into_blob();
     let head_bytes = head_blob.data.as_slice();
 
@@ -230,7 +227,7 @@ fn blame_worktree(
             head_commit.id,
             Default::default(),
         )
-        .map_err(|error| format!("git blame failed: {error}"))?;
+        .map_err(BlameFileError::GitBlame)?;
 
     let resolve_author = |commit_id: gix::ObjectId,
                           author_cache: &mut HashMap<gix::ObjectId, Arc<str>>|

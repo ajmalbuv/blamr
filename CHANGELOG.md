@@ -2,6 +2,28 @@
 
 All notable changes to this project will be documented in this file.
 
+## 0.0.7 - Unreleased
+
+### Performance
+
+- **Zero-allocation line counting and clean-file bypass**: Bypassed `split_lines` entirely for clean files in HEAD when not filtering blank lines, and replaced `split_lines().len()` with a zero-allocation `count_lines` byte scanner.
+- **Zero-copy CRLF normalization**: Refactored `normalize_crlf` to return `Cow<'_, [u8]>` with a fast-path scan, eliminating full-file heap allocations on Unix and CRLF-free repositories.
+- **Author interning and `Arc<str>` caching**: Cached commit authors as `Arc<str>` across worker threads and interned authors per file into `Vec<Option<u32>>`, reducing HEAD tracking slot memory from 24 bytes/line to 4 bytes/line (~83% memory reduction) and eliminating `String` clones and `HashMap` lookups from the hot per-line loop.
+- **Repository single-open threading**: Reused the discovered `gix::Repository` instance from tracked file collection in worker threads instead of opening the repository twice.
+- **Bounded event channels**: Switched the blame event channel from unbounded to bounded (`workers * 4`) to prevent unbounded memory growth on monorepos.
+- **Path allocation reductions**: Refactored `path_to_git_string` and `display_path` to build directly into pre-allocated strings without intermediate `Vec<String>` joins.
+
+### Changed
+
+- **Domain error types (`thiserror`)**: Introduced structured domain error enums (`GitError`, `BlameError`, `BlameFileError`, `RunError`) in `src/error.rs`, preserving underlying error sources while guaranteeing exact user-facing error strings and exit codes.
+- **Typed blame event warnings**: `BlameEvent::Warning` now carries `&BlameFileError` directly to eliminate intermediate string formatting in worker event loops.
+- **Worker thread state bundling**: Encapsulated HEAD commit and tree references into `HeadState` to reduce parameter counts and improve thread-local clarity.
+
+### Fixed
+
+- **Filter zero-line authors**: Excluded authors with 0 attributed lines from table and JSON outputs so deleted or fully filtered worktree authors do not render with `0.0%` bars.
+- **Panic safety and worker resilience**: Documented worker panic safety invariants and ensured per-file panics cleanly convert into structured `BlameFileError::WorkerPanic` warnings without crashing worker threads.
+
 ## 0.0.6 - 2026-10-30
 
 ### Fixed

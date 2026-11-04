@@ -1,12 +1,14 @@
 mod blame;
 mod config;
 mod diff_overlay;
+pub mod error;
 mod filter;
 mod git;
 mod output;
 mod stats;
 
 use config::ParseError;
+use error::RunError;
 use std::io::{self, IsTerminal, Write};
 
 pub fn run() -> i32 {
@@ -32,13 +34,17 @@ pub fn run() -> i32 {
         return print_line(&format!("blamr version {}", output::version_string()));
     }
 
-    let (files, repo) = match git::collect_tracked(&config) {
-        Ok(files) => files,
+    match run_pipeline(&config) {
+        Ok(code) => code,
         Err(error) => {
             eprintln!("error: {error}");
-            return 1;
+            1
         }
-    };
+    }
+}
+
+fn run_pipeline(config: &config::Config) -> Result<i32, RunError> {
+    let (files, repo) = git::collect_tracked(config)?;
 
     let stdout_tty = io::stdout().is_terminal();
     let stderr_tty = io::stderr().is_terminal();
@@ -47,30 +53,23 @@ pub fn run() -> i32 {
     let mut progress = output::Progress::new(progress_enabled, output::terminal_width());
     let mut stderr = io::stderr().lock();
 
-    let result = blame::blame_files(&config, repo, files, |event| match event {
+    let stats = blame::blame_files(config, repo, files, |event| match event {
         blame::BlameEvent::Progress { done, total, path } => {
             let _ = progress.update(&mut stderr, done, total, path);
         }
-        blame::BlameEvent::Warning { path, message } => {
+        blame::BlameEvent::Warning { path, error } => {
             let _ = progress.clear(&mut stderr);
+            let message = error.to_string();
             let _ = writeln!(
                 stderr,
                 "warning: blame {}: {}",
                 output::sanitize_terminal(path),
-                output::sanitize_terminal(message)
+                output::sanitize_terminal(&message)
             );
         }
-    });
+    })?;
     let _ = progress.finish(&mut stderr);
     drop(stderr);
-
-    let stats = match result {
-        Ok(stats) => stats,
-        Err(error) => {
-            eprintln!("error: {error}");
-            return 1;
-        }
-    };
 
     if stats.total_files == 0 {
         if config.json_output {
@@ -85,7 +84,7 @@ pub fn run() -> i32 {
         } else {
             "no text files found tracked in this repo".to_owned()
         };
-        return print_line(&message);
+        return print_line_result(&message);
     }
 
     if config.json_output {
@@ -101,12 +100,9 @@ pub fn run() -> i32 {
             by_email: config.by_email,
         },
     ) {
-        Ok(()) => 0,
-        Err(error) if is_broken_pipe(&error) => 0,
-        Err(error) => {
-            eprintln!("error: cannot write output: {error}");
-            1
-        }
+        Ok(()) => Ok(0),
+        Err(error) if is_broken_pipe(&error) => Ok(0),
+        Err(error) => Err(RunError::Output(error)),
     }
 }
 
@@ -134,15 +130,21 @@ fn print_line(message: &str) -> i32 {
     }
 }
 
-fn print_json_result(stats: &stats::Stats) -> i32 {
+fn print_line_result(message: &str) -> Result<i32, RunError> {
+    let mut stdout = io::stdout();
+    match writeln!(stdout, "{message}") {
+        Ok(()) => Ok(0),
+        Err(error) if is_broken_pipe(&error) => Ok(0),
+        Err(error) => Err(RunError::Output(error)),
+    }
+}
+
+fn print_json_result(stats: &stats::Stats) -> Result<i32, RunError> {
     let mut stdout = io::stdout();
     match output::print_json(&mut stdout, stats) {
-        Ok(()) => 0,
-        Err(error) if is_broken_pipe(&error) => 0,
-        Err(error) => {
-            eprintln!("error serializing JSON: {error}");
-            1
-        }
+        Ok(()) => Ok(0),
+        Err(error) if is_broken_pipe(&error) => Ok(0),
+        Err(error) => Err(RunError::JsonOutput(error)),
     }
 }
 
