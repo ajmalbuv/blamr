@@ -26,18 +26,21 @@ impl Stats {
 
     pub fn from_counts(counts: HashMap<String, u64>, total_files: u64) -> Self {
         let total_lines: u64 = counts.values().sum();
+        if total_lines == 0 {
+            return Self {
+                total_files,
+                total_lines: 0,
+                authors: Vec::new(),
+            };
+        }
 
         let mut authors: Vec<AuthorStat> = counts
             .into_iter()
             .filter(|(_, lines)| *lines > 0)
             .map(|(author, lines)| {
-                let percentage = if total_lines > 0 {
-                    // Round to 2 decimal places
-                    let raw = (lines as f64 / total_lines as f64 * 100.0) * 100.0;
-                    raw.round() / 100.0
-                } else {
-                    0.0
-                };
+                // Round to 2 decimal places
+                let raw = (lines as f64 / total_lines as f64 * 100.0) * 100.0;
+                let percentage = raw.round() / 100.0;
                 AuthorStat {
                     author,
                     lines,
@@ -98,6 +101,14 @@ mod tests {
         counts.insert("Carol".to_owned(), 0);
         let stats = Stats::from_counts(counts, 2);
         assert_eq!(stats.total_files, 2);
+        assert_eq!(stats.total_lines, 0);
+        assert!(stats.authors.is_empty());
+    }
+
+    #[test]
+    fn empty_stats() {
+        let stats = Stats::empty();
+        assert_eq!(stats.total_files, 0);
         assert_eq!(stats.total_lines, 0);
         assert!(stats.authors.is_empty());
     }

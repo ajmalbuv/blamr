@@ -484,4 +484,30 @@ mod tests {
         assert!(version.contains('/'));
         assert!(!version.starts_with(" ("));
     }
+
+    #[test]
+    fn terminal_and_unicode_helpers() {
+        let width = terminal_width();
+        assert!(width >= 40);
+
+        assert!(unicode_supported(false));
+        let _ = unicode_supported(true);
+    }
+
+    #[test]
+    fn padding_long_strings() {
+        assert_eq!(pad_right("abcdef", 4), "abcdef");
+        assert_eq!(pad_left("abcdef", 4), "abcdef");
+    }
+
+    #[test]
+    fn progress_finish_and_inactive_clear() {
+        let mut progress = Progress::new(true, 80);
+        let mut buffer = Vec::new();
+        assert!(progress.clear(&mut buffer).is_ok());
+
+        progress.update(&mut buffer, 1, 2, "test.txt").unwrap();
+        assert!(progress.finish(&mut buffer).is_ok());
+        assert!(progress.finish(&mut buffer).is_ok());
+    }
 }

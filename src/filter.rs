@@ -216,6 +216,20 @@ mod tests {
 
         let lock_file = write_file(&dir.path().join("yarn.lock"), b"lockfile content");
         assert!(should_skip(&lock_file, "yarn.lock"));
+
+        let nonexistent = dir.path().join("does_not_exist.txt");
+        assert!(!should_skip(&nonexistent, "does_not_exist.txt"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn skip_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target.txt");
+        fs::write(&target, b"target").unwrap();
+        let link = dir.path().join("link.txt");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        assert!(!should_skip(&link, "link.txt"));
     }
 
     fn write_file(path: &std::path::Path, contents: &[u8]) -> PathBuf {

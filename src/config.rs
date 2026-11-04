@@ -550,4 +550,51 @@ mod tests {
         assert!(cfg.by_email);
         assert!(cfg.ignore_blank);
     }
+
+    #[test]
+    fn undefined_flags_and_missing_arguments() {
+        let mut out = Vec::new();
+        let _ = parse(&args(&["-z"]), 4, &mut out);
+        assert!(String::from_utf8_lossy(&out).contains("flag provided but not defined: -z"));
+
+        out.clear();
+        let _ = parse(&args(&["--unknown-flag"]), 4, &mut out);
+        assert!(
+            String::from_utf8_lossy(&out).contains("flag provided but not defined: -unknown-flag")
+        );
+
+        out.clear();
+        let _ = parse(&args(&["-ext"]), 4, &mut out);
+        assert!(String::from_utf8_lossy(&out).contains("flag needs an argument: -ext"));
+
+        out.clear();
+        let _ = parse(&args(&["-j"]), 4, &mut out);
+        assert!(String::from_utf8_lossy(&out).contains("flag needs an argument: -j"));
+    }
+
+    #[test]
+    fn attached_flag_values_and_optional_bools() {
+        let mut out = Vec::new();
+        let cfg = parse(
+            &args(&[
+                "-j8",
+                "-x.rs",
+                "--email=true",
+                "--ignore-blank=false",
+                "--committed-only=true",
+                "--ascii=false",
+                "--no-progress=true",
+            ]),
+            4,
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(cfg.workers, 8);
+        assert_eq!(cfg.extensions, vec![".rs"]);
+        assert!(cfg.by_email);
+        assert!(!cfg.ignore_blank);
+        assert!(cfg.committed_only);
+        assert!(!cfg.ascii);
+        assert!(cfg.no_progress);
+    }
 }
